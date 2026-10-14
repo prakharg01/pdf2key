@@ -19,6 +19,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# experimental HTML deck input (drives the installed Google Chrome)
+html = ["playwright>=1.40"]
 
 [project.scripts]
 pdf2key = "pdf2key.cli:main"
