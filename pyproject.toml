@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pdf2key"
+version = "0.1.0"
+description = "Convert any PDF into an editable Apple Keynote presentation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pymupdf>=1.24",
+    "python-pptx>=1.0",
+    "flask>=3.0",
+    "numpy>=1.26",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+pdf2key = "pdf2key.cli:main"
+pdf2key-web = "pdf2key.web:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pdf2key"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

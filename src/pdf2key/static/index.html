@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF to Keynote</title>
+<style>
+:root{--bg:#f6f6f4;--card:#fff;--ink:#1c1c1e;--mute:#6b6b70;--line:#e2e2de;--accent:#2f6fed;--ok:#1a8a4a;--warn:#b26a00}
+@media (prefers-color-scheme:dark){:root{--bg:#161618;--card:#202023;--ink:#f2f2f3;--mute:#9a9aa0;--line:#333338;--accent:#6b9bff;--ok:#4cc77f;--warn:#e8a43a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:980px;margin:0 auto;padding:40px 16px 80px}
+h1{font-size:26px;margin:0 0 4px}
+.sub{color:var(--mute);margin:0 0 28px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px}
+#drop{border:2px dashed var(--line);border-radius:14px;padding:48px 16px;text-align:center;cursor:pointer;transition:.15s;background:var(--card)}
+#drop.over,#drop:hover{border-color:var(--accent)}
+#drop b{display:block;font-size:17px;margin-bottom:4px}
+#drop span{color:var(--mute)}
+label.opt{display:flex;gap:8px;align-items:center;margin-top:14px;color:var(--mute);font-size:14px}
+.bar{height:8px;background:var(--line);border-radius:99px;overflow:hidden;margin:14px 0 8px}
+.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s}
+.hide{display:none}
+button.go,a.go{display:inline-block;background:var(--accent);color:#fff;border:0;border-radius:10px;padding:11px 20px;font:inherit;font-weight:600;text-decoration:none;cursor:pointer}
+button.ghost{background:none;border:1px solid var(--line);color:var(--ink);border-radius:10px;padding:10px 16px;font:inherit;cursor:pointer;margin-left:8px}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:6px}
+.note{margin-top:14px;padding:12px 14px;border-radius:10px;background:color-mix(in srgb,var(--warn) 12%,transparent);color:var(--ink);font-size:14px}
+.err{color:#d33;margin-top:12px}
+.slides{display:grid;gap:14px;margin-top:22px}
+.slide{border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--card)}
+.slide h3{margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between}
+.slide h3 em{font-style:normal;color:var(--ok)}
+.trio{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.trio figure{margin:0}.trio img{width:100%;border-radius:6px;display:block;border:1px solid var(--line)}
+.trio figcaption{font-size:12px;color:var(--mute);text-align:center;margin-top:3px}
+@media(max-width:640px){.trio{grid-template-columns:1fr}}
+</style></head><body><main>
+<h1>PDF to Keynote</h1>
+<p class="sub">Upload a PDF and get an editable Keynote file: real text boxes, original-quality pictures, matching layout.</p>
+
+<div id="drop"><b>Drop a PDF here or click to choose</b><span>Converted locally on this Mac, nothing is uploaded anywhere</span>
+<input id="file" type="file" accept="application/pdf,.pdf" class="hide"></div>
+<label class="opt"><input id="bg" type="checkbox" checked> Keep vector line art, gradients and shapes (flattened into one transparent image)</label>
+
+<div id="work" class="card hide" style="margin-top:22px">
+  <div id="msg">Starting…</div><div class="bar"><i id="fill"></i></div>
+  <div id="err" class="err hide"></div>
+</div>
+<div id="result" class="hide" style="margin-top:22px">
+  <div class="card">
+    <div class="row"><a id="dl" class="go">Download Keynote</a><button class="ghost" id="again">Convert another</button></div>
+    <p id="summary" style="margin:14px 0 0"></p>
+    <div id="fonts" class="note hide"></div>
+  </div>
+  <div id="slides" class="slides"></div>
+</div>
+</main>
+<script>
+const $=id=>document.getElementById(id), drop=$('drop'), file=$('file');
+drop.onclick=()=>file.click();
+file.onchange=()=>file.files[0]&&start(file.files[0]);
+['dragover','dragenter'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('over')}));
+['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove('over')}));
+drop.addEventListener('drop',ev=>{const f=ev.dataTransfer.files[0];f&&start(f)});
+$('again').onclick=()=>{$('result').classList.add('hide');$('work').classList.add('hide');drop.classList.remove('hide');$('bg').parentElement.classList.remove('hide');file.value=''};
+
+async function start(f){
+  if(!f.name.toLowerCase().endsWith('.pdf')){alert('Please choose a PDF file.');return}
+  drop.classList.add('hide');$('bg').parentElement.classList.add('hide');
+  $('work').classList.remove('hide');$('result').classList.add('hide');
+  $('err').classList.add('hide');$('msg').textContent='Uploading…';$('fill').style.width='2%';
+  const fd=new FormData();fd.append('pdf',f);fd.append('background',$('bg').checked?'1':'0');
+  const r=await fetch('/convert',{method:'POST',body:fd});const j=await r.json();
+  if(!r.ok){fail(j.error);return}
+  poll(j.id);
+}
+function fail(m){$('err').textContent=m||'Conversion failed';$('err').classList.remove('hide');$('msg').textContent='Something went wrong';
+  drop.classList.remove('hide');$('bg').parentElement.classList.remove('hide')}
+async function poll(id){
+  const s=await (await fetch('/status/'+id)).json();
+  $('msg').textContent=s.message||'Working…';$('fill').style.width=Math.max(2,(s.progress||0)*100)+'%';
+  if(s.state==='error')return fail(s.error);
+  if(s.state==='done')return show(id,s);
+  setTimeout(()=>poll(id),700);
+}
+function show(id,s){
+  $('work').classList.add('hide');$('result').classList.remove('hide');
+  $('dl').href='/download/'+id;
+  const r=s.reports||[];
+  if(r.length){const avg=r.reduce((a,x)=>a+x.match,0)/r.length;
+    $('summary').innerHTML='<b>'+r.length+' slide'+(r.length>1?'s':'')+'</b> converted. Average pixel match with the PDF: <b>'+avg.toFixed(1)+'%</b>.'}
+  if(s.missing_fonts&&s.missing_fonts.length){const f=$('fonts');f.classList.remove('hide');
+    f.textContent='Fonts not installed on this Mac, so similar ones were substituted: '+s.missing_fonts.join(', ')+
+    '. Install them and convert again for a closer match.'}else $('fonts').classList.add('hide');
+  $('slides').innerHTML=r.map(x=>`<div class="slide"><h3><span>Slide ${x.page}</span><em>${x.match.toFixed(1)}% match · ${x.off_pixels.toFixed(1)}% pixels differ</em></h3>
+   <div class="trio">${['pdf','key','diff'].map(k=>`<figure><img loading="lazy" src="/preview/${id}/${x.page}_${k}.jpg"><figcaption>${{pdf:'PDF',key:'Keynote',diff:'Difference'}[k]}</figcaption></figure>`).join('')}</div></div>`).join('');
+}
+</script></body></html>

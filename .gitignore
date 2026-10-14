@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+
+# Conversion inputs/outputs (keep documents out of the repo)
+*.pdf
+*.key
+*.pptx
+
+# macOS
+.DS_Store
