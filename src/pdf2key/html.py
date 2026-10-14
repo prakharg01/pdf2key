@@ -143,6 +143,8 @@ HIDE_TEXT_CSS = """
 
 
 def _find_html(path, workdir):
+    """The deck's HTML file, from a .zip export, an unzipped export folder, or
+    the .html itself. Its assets (images, styles, fonts) must sit beside it."""
     path = Path(path)
     if path.suffix.lower() == ".zip":
         with zipfile.ZipFile(path) as z:
@@ -150,10 +152,14 @@ def _find_html(path, workdir):
                 if name.startswith("/") or ".." in Path(name).parts:
                     raise ValueError(f"unsafe path in zip: {name}")
             z.extractall(workdir)
-        candidates = [p for p in Path(workdir).rglob("*.html") if not p.name.startswith(".")]
+        path = Path(workdir)
+    if path.is_dir():
+        candidates = [p for p in path.rglob("*.html") if not p.name.startswith(".")]
         if not candidates:
-            raise ValueError("no .html file in the zip")
-        path = max(candidates, key=lambda p: p.stat().st_size)
+            raise ValueError(f"no .html file in {path.name}")
+        path = max(candidates, key=lambda p: p.stat().st_size)  # the deck, not helper pages
+    elif path.suffix.lower() not in (".html", ".htm"):
+        raise ValueError("expected a .zip export, an export folder, or an .html file")
     return path.resolve()
 
 

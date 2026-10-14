@@ -9,7 +9,8 @@ from .converter import convert, missing_fonts, pdf_to_pptx
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="pdf2key", description="Convert a PDF into an editable Keynote presentation. "
                                  "Experimental: give an HTML deck (or a .zip of one) to also get movable pictures.")
-    ap.add_argument("pdf", help="input PDF, or HTML deck / .zip export (experimental)")
+    ap.add_argument("pdf", help="input PDF, or an HTML deck export: the .zip, the unzipped folder, "
+                                "or the .html inside it (experimental)")
     ap.add_argument("output", nargs="?", help="output .key (default: next to the PDF)")
     ap.add_argument("--pptx-only", action="store_true", help="write a .pptx and skip Keynote")
     ap.add_argument("--separate-images", action="store_true",
@@ -20,10 +21,11 @@ def main(argv=None):
     pdf = Path(args.pdf).resolve()
     if not pdf.exists():
         ap.error(f"{pdf} not found")
-    out = Path(args.output).resolve() if args.output else pdf.with_suffix(".key")
+    out = Path(args.output).resolve() if args.output else (
+        pdf.parent / f"{pdf.name}.key" if pdf.is_dir() else pdf.with_suffix(".key"))
     log = lambda msg, frac: print(f"  {msg}", file=sys.stderr)
 
-    if pdf.suffix.lower() in (".html", ".htm", ".zip"):
+    if pdf.is_dir() or pdf.suffix.lower() in (".html", ".htm", ".zip"):
         from .html import convert_html
         font_report = {}
         reports = convert_html(pdf, out, not args.no_verify, log, font_report=font_report)

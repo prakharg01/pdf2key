@@ -55,3 +55,22 @@ def test_html_deck_gets_movable_cropped_pictures_under_overlays(chrome, tmp_path
     overlay = shapes.index(photo) + 1                          # the gradient is a layer above it
     assert shapes[overlay].shape_type == 13
     assert any(s.has_text_frame and "Hello deck" in s.text_frame.text for s in shapes)
+
+
+def test_find_html_accepts_zip_folder_or_file(tmp_path):
+    import zipfile
+    from pdf2key.html import _find_html
+    deck = tmp_path / "export" / "My Deck"
+    (deck / "assets").mkdir(parents=True)
+    (deck / "My Deck.html").write_text("<section>" + "x" * 500 + "</section>")
+    (deck / "assets" / "helper.html").write_text("<p>small</p>")
+    assert _find_html(deck.parent, tmp_path / "w1").name == "My Deck.html"       # folder
+    assert _find_html(deck / "My Deck.html", tmp_path / "w2").name == "My Deck.html"  # file
+    z = tmp_path / "deck.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for f in deck.rglob("*.html"):
+            zf.write(f, f.relative_to(tmp_path))
+    (tmp_path / "w3").mkdir()
+    assert _find_html(z, tmp_path / "w3").name == "My Deck.html"                  # zip
+    with pytest.raises(ValueError):
+        _find_html(tmp_path / "deck.txt", tmp_path / "w4")
