@@ -1,12 +1,15 @@
 """Core PDF -> editable Keynote conversion.
 
-Each PDF page becomes a slide, layered bottom to top as:
-  1. background - a full-page fill becomes the slide background color
-  2. pictures   - embedded images (original quality, transparency kept)
-  3. line art   - vector shapes/lines/gradients, flattened into one 300 dpi
-                  transparent image (optional)
-  4. text       - real text boxes with the PDF's exact line breaks, line
-                  spacing, size, color, bold/italic, and rotation
+Each PDF page becomes a slide with two layers:
+  1. art  - everything except text (photos, shapes, gradients, logos) rendered
+            exactly as the PDF draws it, so stacking, cropping, transparency
+            and masks are always right. One high-resolution picture.
+  2. text - real, editable text boxes with the PDF's line breaks, line spacing,
+            letter-spacing, size, color, opacity, weight and rotation.
+
+With separate_images=True the art layer is instead split into individually
+movable pictures plus a flattened line-art overlay; easier to rearrange, but
+less faithful when the PDF crops, masks, or layers its images.
 
 Pipeline: PDF --PyMuPDF--> .pptx (python-pptx) --Keynote (AppleScript)--> .key
 Afterwards every slide is exported from Keynote and compared with the PDF page.
@@ -28,9 +31,11 @@ from PIL import Image
 from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
+from pptx.oxml.ns import qn
 from pptx.util import Emu, Pt
 
 PT_TO_EMU = 12700
+ART_WIDTH_PX = 3840  # art layer resolution (4K across the slide)
 FONT_DIRS = [Path("/Library/Fonts"), Path("/System/Library/Fonts"), Path.home() / "Library/Fonts"]
 WEIGHT_WORDS = {"thin", "extralight", "ultralight", "light", "medium", "semibold", "demibold",
                 "extrabold", "ultrabold", "black", "heavy", "condensed", "narrow"}
@@ -58,6 +63,12 @@ class _Fit:
 
     def d(self, v):
         return _emu(max(v, 0) * self.s)
+
+
+def _page_copy(page):
+    doc = pymupdf.open()
+    doc.insert_pdf(page.parent, from_page=page.number, to_page=page.number)
+    return doc
 
 
 # --------------------------------------------------------------------------- #
@@ -88,12 +99,26 @@ def _is_installed(base):
     return n in stems or (len(n) >= 4 and any(s.startswith(n) for s in stems))
 
 
-def _font_info(pdf_name, flags):
+def _anonymous(pdf_name):
+    """Fonts without a usable name (e.g. Type3 glyph fonts from Chrome/Skia)."""
+    name = pdf_name.split("+")[-1].strip()
+    return not name or name.startswith("Type3")
+
+
+def _font_info(pdf_name, flags, mono=False, weight=None, slanted=False):
     """Return (family, bold, italic, measuring_font, exact).
 
-    exact=False means the real font isn't installed and a lookalike is used, so
+    exact=False means the real font isn't available and a lookalike is used, so
     sizes are scaled per text box to keep line widths close to the PDF.
     """
+    if _anonymous(pdf_name):
+        # weight/slanted are measured from the glyphs (see _measure_fonts)
+        if mono:
+            return "Menlo", weight == "bold", slanted, "cour", False
+        if weight == "medium":
+            return "Helvetica Neue Medium", False, slanted, "helv", False
+        return "Helvetica Neue", weight == "bold", slanted, "hebo" if weight == "bold" else "helv", False
+
     name = pdf_name.split("+")[-1]
     parts = [p for p in re.split(r"[-,]", name) if p] or ["Helvetica"]
     base, styles = parts[0], [p.lower() for p in parts[1:]]
@@ -107,12 +132,16 @@ def _font_info(pdf_name, flags):
     if _is_installed(base):
         family = " ".join([pretty] + [w.capitalize() for w in weight])
         return family, bold, italic, None, True
-    if any(k in low for k in ("mono", "courier", "consolas", "menlo", "typewriter", "code")):
+    if mono or any(k in low for k in ("mono", "courier", "consolas", "menlo", "typewriter", "code")):
         return "Menlo", bold, italic, "cour", False
     if ("serif" in low and "sans" not in low) or any(
             k in low for k in ("times", "georgia", "garamond", "palatino", "minion", "cambria", "bookman")):
         return "Times New Roman", bold, italic, "tibo" if bold else "tiro", False
     return "Helvetica Neue", bold, italic, "hebo" if bold else "helv", False
+
+
+def _span_font(span):
+    return _font_info(span["font"], span["flags"], span["mono"], span["weight"], span["slanted"])
 
 
 def _scale_for(lines):
@@ -122,20 +151,253 @@ def _scale_for(lines):
         want = line["bbox"][2] - line["bbox"][0]
         have = 0
         for s in line["spans"]:
-            _, _, _, measure, exact = _font_info(s["font"], s["flags"])
+            _, _, _, measure, exact = _span_font(s)
             if exact or measure is None:
                 return 1.0
             have += pymupdf.Font(measure).text_length(s["text"], s["size"])
+            have += s["tracking"] * max(len(s["text"]) - 1, 0)
         if have > 0 and want > 0:
             ratios.append(want / have)
     if not ratios:
         return 1.0
-    return min(max(statistics.median(ratios), 0.8), 1.1)
+    return min(max(statistics.median(ratios), 0.8), 1.15)
 
 
 # --------------------------------------------------------------------------- #
-# Images
+# Text extraction: rebuild words and letter-spacing from glyph positions
 # --------------------------------------------------------------------------- #
+def _rebuild(chars, size, direction):
+    """Join glyphs into text, inserting spaces at word gaps.
+
+    Returns (text, tracking, mono). Tracking is the extra space between
+    letters (CSS letter-spacing); mono means every glyph has the same advance.
+    """
+    dx, dy = direction
+    pos = [c["origin"][0] * dx + c["origin"][1] * dy for c in chars]
+    adv = [(c["bbox"][2] - c["bbox"][0]) * abs(dx) + (c["bbox"][3] - c["bbox"][1]) * abs(dy) for c in chars]
+    gaps = [pos[i + 1] - (pos[i] + adv[i]) for i in range(len(chars) - 1)]
+    glyph_pairs = [i for i in range(len(gaps)) if chars[i]["c"] != " " and chars[i + 1]["c"] != " "]
+
+    tracking = statistics.median(gaps[i] for i in glyph_pairs) if len(glyph_pairs) >= 2 else 0
+    word_gap = [i for i in glyph_pairs if gaps[i] - tracking > 0.22 * size]
+    letter = [gaps[i] for i in glyph_pairs if i not in word_gap]
+    if letter:
+        tracking = statistics.median(letter)
+    # Glyph boxes can be wider than the advance (italic overhang, Type3 font
+    # boxes), which reads as negative spacing, so only clear positive
+    # letter-spacing is kept; width fitting absorbs the rest.
+    tracking = min(tracking, size) if tracking > 0.05 * size else 0
+
+    out = [chars[0]["c"]]
+    for i in range(len(gaps)):
+        if i in word_gap:
+            out.append(" ")
+        out.append(chars[i + 1]["c"])
+
+    widths = [a for a, c in zip(adv, chars) if c["c"].strip()]
+    mono = len(widths) >= 4 and max(widths) - min(widths) < 0.03 * size
+    return "".join(out), tracking, mono
+
+
+def _merge_spans(spans, hidden):
+    """Join consecutive same-style spans (Chrome emits one per word) and drop
+    invisible ones, so words and letter-spacing are judged over whole runs."""
+    merged = []
+    for s in spans:
+        if not s["chars"]:
+            continue
+        sb = pymupdf.Rect(s["bbox"])
+        if any(h.contains(sb.tl + (sb.br - sb.tl) * 0.5) for h in hidden):
+            continue
+        key = (s["font"], round(s["size"], 2), s["color"], s.get("alpha", 255))
+        punct = not any(ch["c"].isalnum() for ch in s["chars"])
+        if merged and (merged[-1]["key"] == key or (punct and merged[-1]["key"][1:] == key[1:])):
+            m = merged[-1]
+            m["chars"] = m["chars"] + s["chars"]
+            m["bbox"] = tuple(pymupdf.Rect(m["bbox"]) | sb)
+        else:
+            merged.append(dict(s, key=key, chars=list(s["chars"])))
+    return merged
+
+
+def _split_segments(spans, direction):
+    """Split a PDF line where it jumps far sideways or changes baseline: those
+    are separate items (a figure and its caption) that only happen to align."""
+    if direction != (1.0, 0.0):
+        return [spans] if spans else []
+    segs = []
+    for sp in spans:
+        if segs:
+            prev = segs[-1][-1]
+            size = max(prev["size"], sp["size"])
+            far = sp["bbox"][0] - prev["bbox"][2] > 1.2 * size
+            shifted = abs(sp["origin"][1] - prev["origin"][1]) > 0.25 * size
+            if not (far or shifted):
+                segs[-1].append(sp)
+                continue
+        segs.append([sp])
+    return segs
+
+
+def _baseline(line):
+    return max(line["spans"], key=lambda s: s["size"])["origin"][1]
+
+
+def _extract_blocks(page):
+    """Text blocks -> lines -> spans, with spaces, tracking and visibility fixed up."""
+    hidden = [pymupdf.Rect(t["bbox"]) for t in page.get_texttrace()
+              if t["type"] == 3 or t["opacity"] == 0]
+    raw = page.get_text("rawdict", flags=pymupdf.TEXTFLAGS_RAWDICT | pymupdf.TEXT_INHIBIT_SPACES)
+    blocks = []
+    for b in raw["blocks"]:
+        if b["type"] != 0:
+            continue
+        lines = []
+        for l in b["lines"]:
+            spans = []
+            prev_end = None
+            dx, dy = l["dir"]
+            for s in _merge_spans(l["spans"], hidden):
+                chars = s["chars"]
+                text, tracking, mono = _rebuild(chars, s["size"], l["dir"])
+                start = chars[0]["origin"][0] * dx + chars[0]["origin"][1] * dy
+                if prev_end is not None and spans and not text.startswith(" ") \
+                        and not spans[-1]["text"].endswith(" ") and start - prev_end > 0.22 * s["size"]:
+                    text = " " + text
+                last = chars[-1]
+                prev_end = last["origin"][0] * dx + last["origin"][1] * dy + \
+                    (last["bbox"][2] - last["bbox"][0]) * abs(dx) + (last["bbox"][3] - last["bbox"][1]) * abs(dy)
+                spans.append(dict(text=text, size=s["size"], font=s["font"], flags=s["flags"],
+                                  color=s["color"], alpha=s.get("alpha", 255), tracking=tracking,
+                                  mono=mono, weight=None, slanted=False, origin=s["origin"], bbox=s["bbox"], chars=chars))
+            for seg in _split_segments(spans, l["dir"]):
+                if "".join(sp["text"] for sp in seg).strip():
+                    bbox = pymupdf.Rect(seg[0]["bbox"])
+                    for sp in seg[1:]:
+                        bbox |= pymupdf.Rect(sp["bbox"])
+                    lines.append(dict(bbox=tuple(bbox), dir=l["dir"], spans=seg))
+        if lines:
+            blocks.append(lines)
+    return blocks
+
+
+def _spans(pages_blocks):
+    for blocks in pages_blocks:
+        for lines in blocks:
+            for l in lines:
+                for s in l["spans"]:
+                    yield l, s
+
+
+def _unify_mono(pages_blocks):
+    """Monospace is a property of the font: decide it by majority per font."""
+    votes = {}
+    for _, s in _spans(pages_blocks):
+        if sum(1 for c in s["chars"] if c["c"].strip()) >= 4:
+            votes.setdefault(s["font"], []).append(s["mono"])
+    mono = {f: sum(v) > len(v) / 2 for f, v in votes.items()}
+    for _, s in _spans(pages_blocks):
+        s["mono"] = mono.get(s["font"], s["mono"])
+
+
+SLANTS = np.linspace(-0.4, 0.4, 17)
+
+
+def _slant_sharpness(a):
+    """Deslant test: for each candidate slant, undo it and measure how sharp
+    the column profile gets. Upright text peaks at 0, italics near +0.2."""
+    h, w = a.shape
+    rows = np.arange(h)
+    pad = int(np.ceil(0.4 * h)) + 1
+    out = np.empty(len(SLANTS))
+    for k, t in enumerate(SLANTS):
+        offs = np.round(-t * (h / 2 - rows)).astype(int) + pad
+        proj = np.zeros(w + 2 * pad)
+        for r in range(h):
+            proj[offs[r]:offs[r] + w] += a[r]
+        out[k] = (proj ** 2).sum()
+    return out / out.max()
+
+
+def _measure_fonts(page, blocks, stats):
+    """For each nameless font, accumulate its ink versus regular Helvetica
+    drawn with the same glyphs at the same positions, and its slant profile."""
+    targets = [s for lines in blocks for l in lines for s in l["spans"]
+               if _anonymous(s["font"]) and not s["mono"] and l["dir"] == (1.0, 0.0) and s["text"].strip()]
+    if not targets:
+        return
+    zoom = 3
+    src = _page_copy(page)
+    sp = src[0]
+    sp.add_redact_annot(sp.rect, fill=False)
+    sp.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_REMOVE,
+                        graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED,
+                        text=pymupdf.PDF_REDACT_TEXT_NONE)
+    ref = pymupdf.open()
+    rp = ref.new_page(width=page.rect.width, height=page.rect.height)
+    for s in targets:
+        for c in s["chars"]:
+            if c["c"].strip():
+                rp.insert_text(c["origin"], c["c"], fontname="helv", fontsize=s["size"])
+
+    def alpha(p):
+        pix = p.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=True)
+        return np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)[:, :, -1].astype(np.float64)
+
+    ink, base = alpha(sp), alpha(rp)
+    for s in targets:
+        x0, y0, x1, y1 = (int(v * zoom) for v in s["bbox"])
+        a, b = ink[y0:y1, x0:x1], base[y0:y1, x0:x1]
+        n = sum(1 for c in s["chars"] if c["c"].strip())
+        st = stats.setdefault(s["font"], dict(ink=0.0, ref=0.0, n=0, sharp=np.zeros(len(SLANTS)), samples=0))
+        st["ink"] += a.sum()
+        st["ref"] += b.sum()
+        st["n"] += n
+        if st["samples"] < 20 and a.shape[0] >= 8 and a.sum() > 0:
+            st["sharp"] += _slant_sharpness(a)
+            st["samples"] += 1
+    src.close()
+    ref.close()
+
+
+def _assign_styles(pages_blocks, stats):
+    """Weight relative to the document's body font (the one with the most
+    glyphs), which cancels out how heavy the family is compared to Helvetica:
+    within ~15% is regular, up to ~45% heavier is medium, beyond that bold."""
+    ratios = {f: st["ink"] / st["ref"] for f, st in stats.items() if st["ref"] > 0 and st["n"] >= 3}
+    if not ratios:
+        return
+    body = ratios[max(ratios, key=lambda f: stats[f]["n"])]
+    weight, slanted = {}, {}
+    for f, r in ratios.items():
+        rel = r / body
+        weight[f] = "bold" if rel > 1.45 or r > 1.75 else "medium" if rel > 1.15 else "regular"
+        st = stats[f]
+        slanted[f] = st["samples"] > 0 and SLANTS[int(np.argmax(st["sharp"]))] >= 0.1
+    for _, s in _spans(pages_blocks):
+        if s["font"] in weight:
+            s["weight"] = weight[s["font"]]
+            s["slanted"] = slanted[s["font"]]
+
+
+# --------------------------------------------------------------------------- #
+# Art layer (default) and separate pictures (optional)
+# --------------------------------------------------------------------------- #
+def _add_art(slide, page, fit):
+    """The page with its text removed, as one high-resolution picture."""
+    copy = _page_copy(page)
+    cp = copy[0]
+    cp.add_redact_annot(cp.rect, fill=False)
+    cp.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
+                        graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+                        text=pymupdf.PDF_REDACT_TEXT_REMOVE)
+    zoom = min(ART_WIDTH_PX / page.rect.width, 8)
+    pix = cp.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+    data = pix.tobytes("jpg", jpg_quality=92) if page.get_images() else pix.tobytes("png")
+    copy.close()
+    slide.shapes.add_picture(BytesIO(data), fit.x(0), fit.y(0), fit.d(page.rect.width), fit.d(page.rect.height))
+
+
 def _image_data(doc, xref):
     """Original bytes when the image is plain RGB/gray JPEG/PNG, else re-encode."""
     try:
@@ -174,16 +436,12 @@ def _add_images(slide, page, fit):
         slide.shapes.add_picture(BytesIO(data), fit.x(r.x0), fit.y(r.y0), fit.d(r.width), fit.d(r.height))
 
 
-# --------------------------------------------------------------------------- #
-# Line art + background
-# --------------------------------------------------------------------------- #
 def _add_line_art(slide, page, fit):
     """Everything that isn't text or an image, as one transparent picture."""
     drawings = page.get_drawings()
     if not drawings:
         return
-    copy = pymupdf.open()
-    copy.insert_pdf(page.parent, from_page=page.number, to_page=page.number)
+    copy = _page_copy(page)
     cp = copy[0]
 
     # Full-page fills (the page "paper") would make the overlay opaque and hide
@@ -202,18 +460,17 @@ def _add_line_art(slide, page, fit):
             copy.close()
             return
 
-    # Drop text and images (they are re-added as real objects), keep line art.
     cp.add_redact_annot(cp.rect, fill=False)
     cp.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_REMOVE,
                         graphics=pymupdf.PDF_REDACT_LINE_ART_NONE)
-    dpi = min(300, 6000 / (page.rect.width / 72))
-    data = cp.get_pixmap(dpi=dpi, alpha=True).tobytes("png")
+    zoom = min(ART_WIDTH_PX / page.rect.width, 8)
+    data = cp.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=True).tobytes("png")
     copy.close()
     slide.shapes.add_picture(BytesIO(data), fit.x(0), fit.y(0), fit.d(page.rect.width), fit.d(page.rect.height))
 
 
 # --------------------------------------------------------------------------- #
-# Text
+# Text boxes
 # --------------------------------------------------------------------------- #
 def _is_rotated(line):
     dx, dy = line["dir"]
@@ -235,24 +492,26 @@ def _alignment(lines):
     return PP_ALIGN.LEFT
 
 
-def _split_lines(block):
-    """PyMuPDF sometimes puts unrelated text (a row of labels, a callout label)
-    into one block. Start a new group when a line sits beside, or far off to the
-    side of, the group so far; one-column paragraphs stay together. Rotated
-    lines each get their own group.
+def _split_lines(lines):
+    """PDF text blocks often hold unrelated text (a row of labels, a callout
+    label). Start a new group when a line sits beside, or far off to the side
+    of, the group so far; one-column paragraphs stay together. Rotated lines
+    each get their own group.
     """
-    lines = [l for l in block["lines"] if l["spans"] and "".join(s["text"] for s in l["spans"]).strip()]
     flat = [l for l in lines if not _is_rotated(l)]
     groups = [[l] for l in lines if _is_rotated(l)]
     if _alignment(flat) != PP_ALIGN.LEFT:
         return groups + ([flat] if flat else [])
     cur = None
     for line in flat:
-        size = line["spans"][0]["size"]
+        size = max(s["size"] for s in line["spans"])
         if cur:
+            prev_size = max(s["size"] for s in cur[-1]["spans"])
             same_column = abs(line["bbox"][0] - cur[0]["bbox"][0]) <= 3 * size
-            below = line["spans"][0]["origin"][1] > cur[-1]["spans"][0]["origin"][1] + 0.3 * size
-            if same_column and below:
+            below = _baseline(line) > _baseline(cur[-1]) + 0.3 * size
+            close = _baseline(line) - _baseline(cur[-1]) < 2.5 * size
+            same_size = abs(size - prev_size) <= 0.15 * max(size, prev_size)
+            if same_column and below and close and same_size:
                 cur.append(line)
                 continue
         cur = [line]
@@ -260,12 +519,33 @@ def _split_lines(block):
     return groups
 
 
-def _add_text(slide, page, fit):
-    for block in page.get_text("dict")["blocks"]:
-        if block["type"] != 0:
-            continue
-        for lines in _split_lines(block):
-            _add_text_box(slide, lines, fit)
+def _set_color(font, color, alpha):
+    font.color.rgb = RGBColor((color >> 16) & 255, (color >> 8) & 255, color & 255)
+    if alpha < 255:
+        clr = font.color._color._xClr  # <a:srgbClr>
+        el = clr.makeelement(qn("a:alpha"), {"val": str(round(alpha / 255 * 100000))})
+        clr.append(el)
+
+
+# Keynote with exact line spacing L puts a line's baseline 0.8*L below the top
+# of that line, and each line is L tall, for every font. Measured, see README.
+BASELINE_IN_LINE = 0.8
+
+
+def _line_heights(lines):
+    """Exact line heights (PDF pt) that put every baseline where the PDF has it."""
+    baselines = [_baseline(l) for l in lines]
+    first = max(s["size"] for s in lines[0]["spans"]) * 1.2
+    gaps = [b - a for a, b in zip(baselines, baselines[1:])]
+    if gaps:
+        first = statistics.median(gaps)
+    heights = [first]
+    for gap, line in zip(gaps, lines[1:]):
+        size = max(s["size"] for s in line["spans"])
+        # baseline_i = baseline_{i-1} + (1 - 0.8) * L_{i-1} + 0.8 * L_i
+        h = (gap - (1 - BASELINE_IN_LINE) * heights[-1]) / BASELINE_IN_LINE
+        heights.append(max(h, 0.5 * size))
+    return baselines[0], heights
 
 
 def _add_text_box(slide, lines, fit):
@@ -276,17 +556,23 @@ def _add_text_box(slide, lines, fit):
     scale = _scale_for(lines)
     align = _alignment(lines)
     rotation = 0
-    left, top, width, height = x0, y0, x1 - x0 + 4, y1 - y0
+    width = (x1 - x0) * 1.02 + 4
 
     if _is_rotated(lines[0]):
         dx, dy = lines[0]["dir"]
         rotation = math.degrees(math.atan2(dy, dx)) % 360
         c, s = abs(dx), abs(dy)
-        thick = lines[0]["spans"][0]["size"] * 1.25
-        length = max((x1 - x0) * c + (y1 - y0) * s - 2 * thick * s * c, thick)
+        size = lines[0]["spans"][0]["size"]
+        heights = [size * 1.2]
+        length = max((x1 - x0) * c + (y1 - y0) * s - 2 * heights[0] * s * c, heights[0])
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        width, height = length + 4, thick
+        width, height = length + 4, heights[0]
         left, top = cx - width / 2, cy - height / 2
+    else:
+        baseline, heights = _line_heights(lines)
+        top = baseline - BASELINE_IN_LINE * heights[0]
+        height = sum(heights)
+        left = {PP_ALIGN.RIGHT: x1 - width, PP_ALIGN.CENTER: (x0 + x1) / 2 - width / 2}.get(align, x0)
 
     box = slide.shapes.add_textbox(fit.x(left), fit.y(top), fit.d(width), fit.d(height))
     box.rotation = rotation
@@ -295,35 +581,38 @@ def _add_text_box(slide, lines, fit):
     tf.auto_size = MSO_AUTO_SIZE.NONE
     tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
 
-    origins = [l["spans"][0]["origin"][1] for l in lines]
-    gaps = [b - a for a, b in zip(origins, origins[1:]) if b - a > 0]
-    pitch = statistics.median(gaps) if gaps else None
-
     for i, line in enumerate(lines):
         para = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
         para.alignment = align
-        if pitch:
-            para.line_spacing = Pt(pitch * fit.s)
+        para.line_spacing = Pt(heights[min(i, len(heights) - 1)] * fit.s)
         para.space_before = para.space_after = Pt(0)
         for span in line["spans"]:
             if not span["text"]:
                 continue
-            family, bold, italic, _, exact = _font_info(span["font"], span["flags"])
+            family, bold, italic, _, exact = _span_font(span)
+            k = (1 if exact else scale) * fit.s
             run = para.add_run()
-            run.text = span["text"].rstrip("\n")
+            run.text = span["text"]
             font = run.font
-            font.size = Pt(max(span["size"] * (1 if exact else scale) * fit.s, 1))
+            font.size = Pt(max(span["size"] * k, 1))
             font.name = family
             font.bold = bold
             font.italic = italic
-            c = span["color"]
-            font.color.rgb = RGBColor((c >> 16) & 255, (c >> 8) & 255, c & 255)
+            if span["tracking"]:
+                run._r.get_or_add_rPr().set("spc", str(round(span["tracking"] * fit.s * 100)))
+            _set_color(font, span["color"], span["alpha"])
+
+
+def _add_text(slide, blocks, fit):
+    for lines in blocks:
+        for group in _split_lines(lines):
+            _add_text_box(slide, group, fit)
 
 
 # --------------------------------------------------------------------------- #
 # Build + Keynote
 # --------------------------------------------------------------------------- #
-def pdf_to_pptx(pdf_path, pptx_path, background=True, progress=None):
+def pdf_to_pptx(pdf_path, pptx_path, separate_images=False, progress=None):
     doc = pymupdf.open(pdf_path)
     if doc.needs_pass:
         raise ValueError("PDF is password protected")
@@ -334,15 +623,27 @@ def pdf_to_pptx(pdf_path, pptx_path, background=True, progress=None):
     prs.slide_width, prs.slide_height = _emu(first.width), _emu(first.height)
     blank = prs.slide_layouts[6]
 
+    pages_blocks, stats = [], {}
     for i, page in enumerate(doc):
         if progress:
-            progress(f"Reading page {i + 1} of {len(doc)}", 0.7 * i / len(doc))
+            progress(f"Reading text on page {i + 1} of {len(doc)}", 0.3 * i / len(doc))
+        pages_blocks.append(_extract_blocks(page))
+    _unify_mono(pages_blocks)
+    for page, blocks in zip(doc, pages_blocks):
+        _measure_fonts(page, blocks, stats)
+    _assign_styles(pages_blocks, stats)
+
+    for i, page in enumerate(doc):
+        if progress:
+            progress(f"Building slide {i + 1} of {len(doc)}", 0.3 + 0.4 * i / len(doc))
         fit = _Fit(page.rect, first.width, first.height)
         slide = prs.slides.add_slide(blank)
-        _add_images(slide, page, fit)
-        if background:
+        if separate_images:
+            _add_images(slide, page, fit)
             _add_line_art(slide, page, fit)
-        _add_text(slide, page, fit)
+        else:
+            _add_art(slide, page, fit)
+        _add_text(slide, pages_blocks[i], fit)
     prs.save(pptx_path)
 
 
@@ -404,10 +705,14 @@ def compare(pdf_path, png_dir, out_dir, thumb_width=720):
             break
         key_img = Image.open(pngs[i]).convert("RGB")
         w, h = key_img.size
-        pix = page.get_pixmap(matrix=pymupdf.Matrix(w / page.rect.width, h / page.rect.height), alpha=False)
-        pdf_img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        if pdf_img.size != key_img.size:
-            pdf_img = pdf_img.resize(key_img.size)
+        # Render the page the way the slide shows it: fit and centered.
+        first = doc[0].rect
+        fit = _Fit(page.rect, first.width, first.height)
+        k = w / first.width
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(fit.s * k, fit.s * k), alpha=False)
+        pdf_img = Image.new("RGB", (w, h), "white")
+        pdf_img.paste(Image.frombytes("RGB", (pix.width, pix.height), pix.samples),
+                      (round(fit.ox * k), round(fit.oy * k)))
         diff = np.abs(np.asarray(pdf_img, dtype=np.int16) - np.asarray(key_img, dtype=np.int16))
         match = 100 * (1 - diff.mean() / 255)
         off = 100 * (diff.max(axis=2) > 48).mean()
@@ -426,7 +731,10 @@ def missing_fonts(pdf_path):
     doc = pymupdf.open(pdf_path)
     for page in doc:
         for f in page.get_fonts():
-            family, _, _, _, exact = _font_info(f[3], 0)
+            if _anonymous(f[3]):
+                missing.add("unnamed embedded fonts (approximated)")
+                continue
+            _, _, _, _, exact = _font_info(f[3], 0)
             if not exact:
                 base = re.split(r"[-,]", f[3].split("+")[-1])[0]
                 missing.add(re.sub(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", base))
@@ -436,13 +744,13 @@ def missing_fonts(pdf_path):
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
-def convert(pdf_path, key_path, background=True, verify=True, progress=None, preview_dir=None):
+def convert(pdf_path, key_path, separate_images=False, verify=True, progress=None, preview_dir=None):
     """PDF -> .key. Returns a list of SlideReport (empty if verify is off)."""
     pdf_path, key_path = Path(pdf_path), Path(key_path)
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         pptx = tmp / "deck.pptx"
-        pdf_to_pptx(pdf_path, pptx, background, progress)
+        pdf_to_pptx(pdf_path, pptx, separate_images, progress)
         if progress:
             progress("Importing into Keynote", 0.8)
         png_dir = tmp / "slides" if verify else None
