@@ -17,6 +17,8 @@ def main(argv=None):
     ap.add_argument("--separate-images", action="store_true",
                     help="make pictures individually movable (less faithful for cropped/masked images)")
     ap.add_argument("--no-verify", action="store_true", help="skip the PDF-vs-Keynote comparison")
+    ap.add_argument("--deck", help="HTML exports holding several decks: which one (part of its file name)")
+    ap.add_argument("--list-decks", action="store_true", help="list the decks in an HTML export and stop")
     args = ap.parse_args(argv)
 
     pdf = Path(args.pdf).resolve()
@@ -37,8 +39,16 @@ def main(argv=None):
 
     rep = report.new("HTML deck" if is_html else "PDF")
     if is_html:
-        from .html import convert_html
-        reports = convert_html(pdf, out, not args.no_verify, log, report=rep)
+        from .html import convert_html, decks_in
+        decks = decks_in(pdf)
+        if args.list_decks:
+            for i, (name, n) in enumerate(decks):
+                print(f"{'*' if i == 0 else ' '} {name}  ({n} slides)")
+            return
+        if len(decks) > 1 and not args.deck:
+            print(f"  {len(decks)} decks in this export; converting {decks[0][0]!r} "
+                  f"(choose another with --deck, see --list-decks)", file=sys.stderr)
+        reports = convert_html(pdf, out, not args.no_verify, log, report=rep, deck=args.deck)
     else:
         fonts = missing_fonts(pdf)
         if fonts:

@@ -81,7 +81,8 @@ def record_accuracy(report, slide_reports, seconds):
 def as_text(report):
     """Plain-text version for the command line."""
     out = ["", "Conversion report", "-----------------",
-           f"Input: {report['input']}, {report['slides']} slides, {report['seconds']:.0f} s"]
+           f"Input: {report['input']}" + (f" ({report['deck']})" if report.get("deck") else "")
+           + f", {report['slides']} slides, {report['seconds']:.0f} s"]
     acc = report["accuracy"]
     if acc:
         worst = ", ".join(f"slide {p} ({m:.1f}%)" for p, m in acc["worst"])

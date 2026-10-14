@@ -44,7 +44,7 @@ def run_job(job_id):
             from .html import convert_html
             with keynote_lock:
                 reports = convert_html(job["pdf"], job["key"], verify=True, progress=progress,
-                                       preview_dir=job["dir"] / "preview", report=rep)
+                                       preview_dir=job["dir"] / "preview", report=rep, deck=job.get("deck"))
         job["identified_fonts"] = rep["identified"]
         job["report"] = rep
         job["reports"] = [r.__dict__ for r in reports]
@@ -70,6 +70,27 @@ def convert():
         state="running", message="Starting", progress=0, pdf=pdf, dir=job_dir,
         key=job_dir / f"{stem}.key", name=f"{stem}.key",
         separate_images=request.form.get("separate_images") == "1", reports=[], missing_fonts=[], identified_fonts=[])
+    if pdf.suffix == ".zip":
+        from .html import decks_in
+        try:
+            decks = decks_in(pdf)
+        except Exception as e:
+            return jsonify(error=f"Couldn't read the export: {e}"), 400
+        if not decks:
+            return jsonify(error="No HTML deck (a page with <section> slides) in this .zip."), 400
+        if len(decks) > 1:  # the export holds several decks: let the person pick
+            jobs[job_id]["state"] = "choose"
+            return jsonify(id=job_id, choices=[{"name": d, "slides": n} for d, n in decks])
+    threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
+    return jsonify(id=job_id)
+
+
+@app.post("/start/<job_id>")
+def start(job_id):
+    job = jobs.get(job_id)
+    if not job or job["state"] != "choose":
+        return jsonify(error="Unknown job"), 404
+    job.update(state="running", deck=(request.get_json(silent=True) or {}).get("deck"))
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return jsonify(id=job_id)
 

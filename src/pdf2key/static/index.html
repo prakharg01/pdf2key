@@ -33,6 +33,9 @@ button.ghost{background:none;border:1px solid var(--line);color:var(--ink);borde
 .trio figcaption{font-size:12px;color:var(--mute);text-align:center;margin-top:3px}
 @media(max-width:640px){.trio{grid-template-columns:1fr}}
 #art{display:block;width:100%;height:260px;margin:-4px 0 6px}
+#choices label{display:flex;gap:10px;align-items:center;padding:9px 10px;border:1px solid var(--line);border-radius:10px;margin-top:6px;cursor:pointer}
+#choices label:has(input:checked){border-color:var(--accent)}
+#choices .n{margin-left:auto;color:var(--mute);font-size:13px;white-space:nowrap}
 #report h2{font-size:17px;margin:0 0 10px}
 #report h3{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:16px 0 6px}
 #report ul{margin:0;padding-left:18px}#report li{margin:2px 0}
@@ -47,6 +50,12 @@ button.ghost{background:none;border:1px solid var(--line);color:var(--ink);borde
 <input id="file" type="file" accept="application/pdf,.pdf,.zip" class="hide"></div>
 <label class="opt"><input id="bg" type="checkbox"> Make pictures individually movable (less faithful when the PDF crops or layers images)</label>
 
+<div id="pick" class="card hide" style="margin-top:22px">
+  <h2 style="font-size:17px;margin:0 0 4px">This export holds several decks</h2>
+  <p style="margin:0 0 12px;color:var(--mute);font-size:14px">Pick the one to convert. The most likely one is selected; print copies, backups and reference pages are listed last.</p>
+  <div id="choices"></div>
+  <div class="row" style="margin-top:14px"><button class="go" id="pickgo">Convert this deck</button></div>
+</div>
 <div id="work" class="card hide" style="margin-top:22px">
   <canvas id="art" aria-hidden="true"></canvas>
   <p id="quip" aria-live="polite"></p>
@@ -203,6 +212,16 @@ function renderReport(r){
   if(r.warnings.length)h+='<h3>Warnings</h3>'+list(r.warnings,w=>`<li>${esc(w)}</li>`);
   el.innerHTML=h;el.classList.remove('hide')}
 
+function chooseDeck(id,choices){
+  art.stop();stopQuips();$('work').classList.add('hide');$('pick').classList.remove('hide');
+  $('choices').innerHTML=choices.map((c,i)=>`<label><input type="radio" name="deck" value="${esc(c.name)}"${i?'':' checked'}>
+    <span>${esc(c.name)}</span><span class="n">${c.slides} slides</span></label>`).join('');
+  $('pickgo').onclick=async()=>{const deck=document.querySelector('input[name=deck]:checked').value;
+    $('pick').classList.add('hide');$('work').classList.remove('hide');art.start();setQuip('layout');
+    $('msg').textContent='Starting…';
+    const r=await fetch('/start/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({deck})});
+    const j=await r.json();if(!r.ok)return fail(j.error);poll(id)}}
+
 async function start(f){
   if(!/\.(pdf|zip)$/i.test(f.name)){alert('Please choose a PDF, or an HTML deck export as its .zip.');return}
   drop.classList.add('hide');$('bg').parentElement.classList.add('hide');
@@ -212,6 +231,7 @@ async function start(f){
   const fd=new FormData();fd.append('pdf',f);fd.append('separate_images',$('bg').checked?'1':'0');
   const r=await fetch('/convert',{method:'POST',body:fd});const j=await r.json();
   if(!r.ok){fail(j.error);return}
+  if(j.choices){chooseDeck(j.id,j.choices);return}
   poll(j.id);
 }
 function fail(m){art.stop();stopQuips();$('quip').textContent='';$('err').textContent=m||'Conversion failed';$('err').classList.remove('hide');$('msg').textContent='Something went wrong';
