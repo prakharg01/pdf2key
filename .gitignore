@@ -15,3 +15,7 @@ dist/
 # macOS
 .DS_Store
 *.zip
+
+# local sample decks and their exports (never commit)
+tests/pdfs/*
+!tests/pdfs/.gitkeep
