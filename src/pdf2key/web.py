@@ -14,6 +14,7 @@ from flask import Flask, jsonify, request, send_file
 from werkzeug.utils import secure_filename
 
 from . import converter
+from . import report as reporting
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024  # 1 GB
@@ -30,20 +31,22 @@ def run_job(job_id):
         job.update(message=message, progress=fraction)
 
     try:
-        font_report = {}
+        is_pdf = job["pdf"].suffix.lower() == ".pdf"
+        rep = reporting.new("PDF" if is_pdf else "HTML deck")
         job["message"] = "Waiting for Keynote"
-        if job["pdf"].suffix.lower() == ".pdf":
+        if is_pdf:
             job["missing_fonts"] = converter.missing_fonts(job["pdf"])
             with keynote_lock:
                 reports = converter.convert(
                     job["pdf"], job["key"], separate_images=job["separate_images"], verify=True,
-                    progress=progress, preview_dir=job["dir"] / "preview", font_report=font_report)
+                    progress=progress, preview_dir=job["dir"] / "preview", report=rep)
         else:  # HTML deck export (.zip / .html): experimental, movable pictures
             from .html import convert_html
             with keynote_lock:
                 reports = convert_html(job["pdf"], job["key"], verify=True, progress=progress,
-                                       preview_dir=job["dir"] / "preview", font_report=font_report)
-        job["identified_fonts"] = font_report.get("identified", [])
+                                       preview_dir=job["dir"] / "preview", report=rep)
+        job["identified_fonts"] = rep["identified"]
+        job["report"] = rep
         job["reports"] = [r.__dict__ for r in reports]
         job.update(state="done", message="Done", progress=1)
     except Exception as e:
@@ -76,7 +79,7 @@ def status(job_id):
     job = jobs.get(job_id)
     if not job:
         return jsonify(error="Unknown job"), 404
-    keys = ("state", "message", "progress", "error", "reports", "missing_fonts", "identified_fonts", "name")
+    keys = ("state", "message", "progress", "error", "reports", "missing_fonts", "identified_fonts", "name", "report")
     return jsonify({k: job.get(k) for k in keys})
 
 

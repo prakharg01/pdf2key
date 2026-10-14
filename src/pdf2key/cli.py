@@ -3,6 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import report
 from .converter import convert, missing_fonts, pdf_to_pptx
 
 
@@ -25,32 +26,27 @@ def main(argv=None):
         pdf.parent / f"{pdf.name}.key" if pdf.is_dir() else pdf.with_suffix(".key"))
     log = lambda msg, frac: print(f"  {msg}", file=sys.stderr)
 
-    if pdf.is_dir() or pdf.suffix.lower() in (".html", ".htm", ".zip"):
-        from .html import convert_html
-        font_report = {}
-        reports = convert_html(pdf, out, not args.no_verify, log, font_report=font_report)
-        if font_report.get("identified"):
-            print(f"  fonts recognised from glyphs: {', '.join(font_report['identified'])}", file=sys.stderr)
-        for r in reports:
-            print(f"  slide {r.page}: {r.match:.2f}% match, {r.off_pixels:.2f}% of pixels differ")
-        print(f"Wrote {out}")
-        return
-
-    fonts = missing_fonts(pdf)
-    if fonts:
-        print(f"  fonts not installed, substituting: {', '.join(fonts)}", file=sys.stderr)
-
+    is_html = pdf.is_dir() or pdf.suffix.lower() in (".html", ".htm", ".zip")
     if args.pptx_only:
+        if is_html:
+            ap.error("--pptx-only works with PDFs")
         pptx = out.with_suffix(".pptx")
         pdf_to_pptx(pdf, pptx, args.separate_images, log)
         print(f"Wrote {pptx}")
         return
-    font_report = {}
-    reports = convert(pdf, out, args.separate_images, not args.no_verify, log, font_report=font_report)
-    if font_report.get("identified"):
-        print(f"  fonts recognised from glyphs: {', '.join(font_report['identified'])}", file=sys.stderr)
+
+    rep = report.new("HTML deck" if is_html else "PDF")
+    if is_html:
+        from .html import convert_html
+        reports = convert_html(pdf, out, not args.no_verify, log, report=rep)
+    else:
+        fonts = missing_fonts(pdf)
+        if fonts:
+            print(f"  fonts not installed, substituting: {', '.join(fonts)}", file=sys.stderr)
+        reports = convert(pdf, out, args.separate_images, not args.no_verify, log, report=rep)
     for r in reports:
         print(f"  slide {r.page}: {r.match:.2f}% match, {r.off_pixels:.2f}% of pixels differ")
+    print(report.as_text(rep))
     print(f"Wrote {out}")
 
 

@@ -35,6 +35,7 @@ from pptx.oxml.ns import qn
 from pptx.util import Emu, Pt
 
 from . import fonts
+from . import report as reporting
 
 PT_TO_EMU = 12700
 ART_WIDTH_PX = 3840  # art layer resolution (4K across the slide)
@@ -671,13 +672,20 @@ def _line_heights(lines):
     return baselines[0], heights
 
 
-def _add_text_box(slide, lines, fit):
+def _add_text_box(slide, lines, fit, stats=None):
     x0 = min(l["bbox"][0] for l in lines)
     y0 = min(l["bbox"][1] for l in lines)
     x1 = max(l["bbox"][2] for l in lines)
     y1 = max(l["bbox"][3] for l in lines)
     scale = _scale_for(lines)
     align = _alignment(lines)
+    if stats is not None:
+        stats["boxes"] += 1
+        if abs(scale - 1) > 0.005:
+            stats["scales"].append(scale)
+        stats["rotated"] += _is_rotated(lines[0])
+        stats["letter_spaced"] += sum(1 for l in lines for sp in l["spans"] if sp["tracking"])
+        stats["justified_lines"] += sum(1 for l in lines if any(sp["word_extra"] for sp in l["spans"]))
     rotation = 0
     width = (x1 - x0) * 1.02 + 4
 
@@ -740,10 +748,10 @@ def _add_runs(para, span, scale, fit):
         _set_color(font, span["color"], span["alpha"])
 
 
-def _add_text(slide, blocks, fit):
+def _add_text(slide, blocks, fit, stats=None):
     for lines in blocks:
         for group in _split_lines(lines):
-            _add_text_box(slide, group, fit)
+            _add_text_box(slide, group, fit, stats)
 
 
 # --------------------------------------------------------------------------- #
@@ -764,7 +772,7 @@ def new_presentation(width_pt, height_pt):
     return prs
 
 
-def analyze_text(doc, progress=None, font_report=None):
+def analyze_text(doc, progress=None, report=None):
     """Text of every page, rebuilt and with fonts resolved: one block list per page."""
     pages_blocks, stats = [], {}
     for i, page in enumerate(doc):
@@ -775,23 +783,21 @@ def analyze_text(doc, progress=None, font_report=None):
     for page, blocks in zip(doc, pages_blocks):
         _measure_fonts(page, blocks, stats)
     _assign_styles(pages_blocks, stats)
-    matched = _identify_fonts(doc, pages_blocks)
-    if font_report is not None:
-        font_report.update(identified=sorted({m.face.keynote_name + (" Italic" if m.face.italic else "")
-                                              for m in matched.values()}))
+    _identify_fonts(doc, pages_blocks)
+    reporting.record_fonts(report, pages_blocks, _span_font, _anonymous)
     return pages_blocks
 
 
-def add_text(slide, blocks, page_rect, slide_w, slide_h):
-    _add_text(slide, blocks, _Fit(page_rect, slide_w, slide_h))
+def add_text(slide, blocks, page_rect, slide_w, slide_h, report=None):
+    _add_text(slide, blocks, _Fit(page_rect, slide_w, slide_h), reporting.text_stats(report))
 
 
-def pdf_to_pptx(pdf_path, pptx_path, separate_images=False, progress=None, font_report=None):
+def pdf_to_pptx(pdf_path, pptx_path, separate_images=False, progress=None, report=None):
     doc = open_pdf(pdf_path)
     first = doc[0].rect
     prs = new_presentation(first.width, first.height)
     blank = prs.slide_layouts[6]
-    pages_blocks = analyze_text(doc, progress, font_report)
+    pages_blocks = analyze_text(doc, progress, report)
 
     for i, page in enumerate(doc):
         if progress:
@@ -803,7 +809,8 @@ def pdf_to_pptx(pdf_path, pptx_path, separate_images=False, progress=None, font_
             _add_line_art(slide, page, fit)
         else:
             _add_art(slide, page, fit)
-        _add_text(slide, pages_blocks[i], fit)
+        _add_text(slide, pages_blocks[i], fit, reporting.text_stats(report))
+    reporting.record_objects(report, prs)
     prs.save(pptx_path)
 
 
@@ -929,20 +936,23 @@ def missing_fonts(pdf_path):
 # Public entry point
 # --------------------------------------------------------------------------- #
 def convert(pdf_path, key_path, separate_images=False, verify=True, progress=None, preview_dir=None,
-            font_report=None):
+            report=None):
     """PDF -> .key. Returns a list of SlideReport (empty if verify is off).
-    Pass a dict as font_report to receive the fonts identified for nameless fonts."""
+    Pass a dict from report.new() as `report` to receive the status report."""
+    started = time.time()
     pdf_path, key_path = Path(pdf_path).resolve(), Path(key_path).resolve()
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         pptx = tmp / "deck.pptx"
-        pdf_to_pptx(pdf_path, pptx, separate_images, progress, font_report)
+        pdf_to_pptx(pdf_path, pptx, separate_images, progress, report)
         if progress:
             progress("Importing into Keynote", 0.8)
         png_dir = tmp / "slides" if verify else None
         pptx_to_keynote(pptx, key_path, png_dir)
-        if not verify:
-            return []
-        if progress:
-            progress("Comparing slides with the PDF", 0.95)
-        return compare(pdf_path, png_dir, preview_dir or tmp / "preview")
+        slides = []
+        if verify:
+            if progress:
+                progress("Comparing slides with the PDF", 0.95)
+            slides = compare(pdf_path, png_dir, preview_dir or tmp / "preview")
+        reporting.record_accuracy(report, slides, time.time() - started)
+        return slides
