@@ -49,6 +49,7 @@ button.ghost{background:none;border:1px solid var(--line);color:var(--ink);borde
     <div class="row"><a id="dl" class="go">Download Keynote</a><button class="ghost" id="again">Convert another</button></div>
     <p id="summary" style="margin:14px 0 0"></p>
     <div id="fonts" class="note hide"></div>
+    <p id="found" class="hide" style="margin:12px 0 0;color:var(--mute);font-size:14px"></p>
   </div>
   <div id="slides" class="slides"></div>
 </div>
@@ -90,6 +91,9 @@ function show(id,s){
   if(s.missing_fonts&&s.missing_fonts.length){const f=$('fonts');f.classList.remove('hide');
     f.textContent='Fonts not installed on this Mac, so similar ones were substituted: '+s.missing_fonts.join(', ')+
     '. Install them and convert again for a closer match.'}else $('fonts').classList.add('hide');
+  const found=s.identified_fonts||[];
+  if(found.length){$('found').textContent='Fonts recognised from the PDF\'s glyphs: '+found.join(', ')+'.';$('found').classList.remove('hide')}
+  else $('found').classList.add('hide');
   $('slides').innerHTML=r.map(x=>`<div class="slide"><h3><span>Slide ${x.page}</span><em>${x.match.toFixed(1)}% match · ${x.off_pixels.toFixed(1)}% pixels differ</em></h3>
    <div class="trio">${['pdf','key','diff'].map(k=>`<figure><img loading="lazy" src="/preview/${id}/${x.page}_${k}.jpg"><figcaption>${{pdf:'PDF',key:'Keynote',diff:'Difference'}[k]}</figcaption></figure>`).join('')}</div></div>`).join('');
 }

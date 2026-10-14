@@ -32,10 +32,12 @@ def run_job(job_id):
     try:
         job["missing_fonts"] = converter.missing_fonts(job["pdf"])
         job["message"] = "Waiting for Keynote"
+        font_report = {}
         with keynote_lock:
             reports = converter.convert(
                 job["pdf"], job["key"], separate_images=job["separate_images"], verify=True,
-                progress=progress, preview_dir=job["dir"] / "preview")
+                progress=progress, preview_dir=job["dir"] / "preview", font_report=font_report)
+        job["identified_fonts"] = font_report.get("identified", [])
         job["reports"] = [r.__dict__ for r in reports]
         job.update(state="done", message="Done", progress=1)
     except Exception as e:
@@ -56,7 +58,7 @@ def convert():
     jobs[job_id] = dict(
         state="running", message="Starting", progress=0, pdf=pdf, dir=job_dir,
         key=job_dir / f"{stem}.key", name=f"{stem}.key",
-        separate_images=request.form.get("separate_images") == "1", reports=[], missing_fonts=[])
+        separate_images=request.form.get("separate_images") == "1", reports=[], missing_fonts=[], identified_fonts=[])
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return jsonify(id=job_id)
 
@@ -66,7 +68,7 @@ def status(job_id):
     job = jobs.get(job_id)
     if not job:
         return jsonify(error="Unknown job"), 404
-    keys = ("state", "message", "progress", "error", "reports", "missing_fonts", "name")
+    keys = ("state", "message", "progress", "error", "reports", "missing_fonts", "identified_fonts", "name")
     return jsonify({k: job.get(k) for k in keys})
 
 

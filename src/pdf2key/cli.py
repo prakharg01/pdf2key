@@ -31,7 +31,10 @@ def main(argv=None):
         pdf_to_pptx(pdf, pptx, args.separate_images, log)
         print(f"Wrote {pptx}")
         return
-    reports = convert(pdf, out, args.separate_images, not args.no_verify, log)
+    font_report = {}
+    reports = convert(pdf, out, args.separate_images, not args.no_verify, log, font_report=font_report)
+    if font_report.get("identified"):
+        print(f"  fonts recognised from glyphs: {', '.join(font_report['identified'])}", file=sys.stderr)
     for r in reports:
         print(f"  slide {r.page}: {r.match:.2f}% match, {r.off_pixels:.2f}% of pixels differ")
     print(f"Wrote {out}")
