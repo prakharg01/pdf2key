@@ -69,10 +69,13 @@ How the text is rebuilt:
 
 - **Baselines.** With exact line spacing *L*, Keynote puts each line's baseline 0.8 × *L* below the top of the line, whatever the font. pdf2key works out each line's spacing so every baseline lands exactly where the PDF has it.
 - **Words and letter-spacing.** Words and letter-spacing are rebuilt from where each glyph sits. This matters for PDFs from browsers (Chrome, "Save as PDF"), which often draw spaced-out labels with no space characters at all.
-- **Fonts with no name.** Browser PDFs often embed fonts with no name (Type3). pdf2key works out their style from the glyphs themselves:
+- **Fonts with no name.** Browser PDFs often embed fonts with no name (Type3). pdf2key **recognises them from their glyph widths**. Every face has its own pattern of letter widths, so it compares the distance between neighbouring glyphs with every font installed on your Mac and picks the face that matches, such as *Montserrat ExtraBold* or *Inter SemiBold Italic*. Variable fonts are checked at each of their named weights. The same comparison also gives the exact letter-spacing. Where several faces have the same widths (all monospace fonts, or an italic and its upright), it draws the glyphs in each candidate and keeps the one that looks most like the PDF. The list of installed fonts is cached in `~/Library/Caches/pdf2key`.
+- **Fallback when no installed font matches.** pdf2key estimates the style from the glyphs instead:
   - **Weight:** each font's ink is compared with the document's body font to sort it into *regular*, *medium* or *bold*.
   - **Italics:** a deslant test finds the shear angle that makes the vertical strokes sharpest.
   - **Monospace:** a font counts as monospace if all its glyphs have the same advance.
+
+  It then uses Helvetica Neue or Menlo at that style.
 - **Unrelated text.** Text that only happens to share a PDF line (such as a figure and its caption) is split into separate boxes.
 
 Pages that are a different size from the first page are scaled to fit the slide.
@@ -83,7 +86,7 @@ This mode places each embedded image as its own picture, on top of a background 
 
 ## Getting the closest match
 
-- **Install the PDF's fonts.** Fonts embedded in a PDF are usually partial subsets that Keynote can't use. If a font isn't installed on your Mac, pdf2key picks a lookalike (Helvetica Neue, Menlo or Times New Roman) and scales it so line widths still match. The app lists which fonts it substituted.
+- **Install the PDF's fonts.** Fonts embedded in a PDF are usually partial subsets that Keynote can't use. If a font isn't installed on your Mac, pdf2key picks a lookalike (Helvetica Neue, Menlo or Times New Roman) and scales it so line widths still match. The app lists the fonts it substituted and the ones it recognised. Free fonts install with Homebrew, for example `brew install --cask font-inter font-montserrat font-jetbrains-mono`. **Restart Keynote** after installing fonts, because it only picks up new fonts when it launches.
 - **Scanned PDFs** contain only images, with no text to extract. Run OCR first (for example `ocrmypdf`).
 
 ## Development
@@ -98,6 +101,7 @@ The tests cover the PDF → `.pptx` stage and don't need Keynote. Put real PDFs 
 ```
 src/pdf2key/
   converter.py   conversion engine and accuracy check
+  fonts.py       installed-font catalog and glyph-width font matching
   cli.py         `pdf2key` command
   web.py         `pdf2key-web` Flask app
   static/        web UI
