@@ -133,3 +133,33 @@ def test_rebuild_measures_justified_word_spacing():
               for c in _glyphs("cd", 5, 0)]
     text, tracking, word_extra, _ = _rebuild(chars, 10, (1.0, 0.0))
     assert text == "ab cd" and tracking == 0 and word_extra == pytest.approx(3)
+
+
+def _face(family, style, adv, mono=False, italic=False, system=False):
+    from pdf2key.fonts import Face
+    return Face(family, style, 400, italic, mono, False, system, "", 0, adv)
+
+
+def test_identify_font_from_glyph_widths():
+    from pdf2key.fonts import identify
+    narrow = {cp: 0.5 for cp in range(32, 127)}
+    wide = {cp: 0.5 + (cp % 7) * 0.05 for cp in range(32, 127)}
+    faces = [_face("Narrow", "Regular", narrow), _face("Wide", "Bold", wide)]
+    # "Wide" drawn at 20pt with 1pt letter-spacing, in two runs
+    text = "Hamburgefonstiv"
+    samples = [(ord(c), 20, wide[ord(c)] * 20 + 1, run) for run in (1, 2) for c in text]
+    best = identify(samples, faces=faces)[0]
+    assert best.face.family == "Wide" and best.face.keynote_name == "Wide Bold"
+    assert best.tracking == pytest.approx(1 / 20)
+
+
+def test_identify_prefers_user_installed_and_italic_hint():
+    from pdf2key.fonts import identify
+    mono = {cp: 0.6 for cp in range(32, 127)}
+    faces = [_face("SystemMono", "Regular", mono, mono=True, system=True),
+             _face("UserMono", "Regular", mono, mono=True),
+             _face("UserMono", "Italic", mono, mono=True, italic=True)]
+    samples = [(ord(c), 10, 6.0, 0) for c in "ABCDEFGH"]
+    assert identify(samples, slanted=False, faces=faces)[0].face.keynote_name == "UserMono"
+    best = identify(samples, slanted=True, faces=faces)[0].face
+    assert best.family == "UserMono" and best.italic

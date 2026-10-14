@@ -34,6 +34,8 @@ from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
 from pptx.oxml.ns import qn
 from pptx.util import Emu, Pt
 
+from . import fonts
+
 PT_TO_EMU = 12700
 ART_WIDTH_PX = 3840  # art layer resolution (4K across the slide)
 FONT_DIRS = [Path("/Library/Fonts"), Path("/System/Library/Fonts"), Path.home() / "Library/Fonts"]
@@ -105,12 +107,14 @@ def _anonymous(pdf_name):
     return not name or name.startswith("Type3")
 
 
-def _font_info(pdf_name, flags, mono=False, weight=None, slanted=False):
+def _font_info(pdf_name, flags, mono=False, weight=None, slanted=False, face=None):
     """Return (family, bold, italic, measuring_font, exact).
 
     exact=False means the real font isn't available and a lookalike is used, so
     sizes are scaled per text box to keep line widths close to the PDF.
     """
+    if face:
+        return face.keynote_name, False, face.italic, None, True
     if _anonymous(pdf_name):
         # weight/slanted are measured from the glyphs (see _measure_fonts)
         if mono:
@@ -141,7 +145,7 @@ def _font_info(pdf_name, flags, mono=False, weight=None, slanted=False):
 
 
 def _span_font(span):
-    return _font_info(span["font"], span["flags"], span["mono"], span["weight"], span["slanted"])
+    return _font_info(span["font"], span["flags"], span["mono"], span["weight"], span["slanted"], span.get("face"))
 
 
 def _scale_for(lines):
@@ -363,6 +367,120 @@ def _measure_fonts(page, blocks, stats):
             st["samples"] += 1
     src.close()
     ref.close()
+
+
+def _advance_samples(span):
+    """(codepoint, size, advance, run id) for each glyph followed by another."""
+    ch = span["chars"]
+    out = []
+    for a, b in zip(ch, ch[1:]):
+        if a["c"] != " " and b["c"] != " ":
+            adv = b["origin"][0] - a["origin"][0]
+            if 0 < adv < 2 * span["size"]:
+                out.append((ord(a["c"]), span["size"], adv, id(span)))
+    return out
+
+
+SHAPE_ZOOM = 4
+
+
+def _ink(page, clip):
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(SHAPE_ZOOM, SHAPE_ZOOM), clip=clip, alpha=True)
+    return np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)[:, :, -1].astype(float)
+
+
+def _pdf_ink(page, span):
+    """The span's glyphs as the PDF draws them (text only), plus the clip."""
+    clip = pymupdf.Rect(span["bbox"]) + (-1, -1, 1, 1)
+    src = _page_copy(page)
+    sp = src[0]
+    sp.add_redact_annot(sp.rect, fill=False)
+    sp.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_REMOVE,
+                        graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED,
+                        text=pymupdf.PDF_REDACT_TEXT_NONE)
+    ink = _ink(sp, clip)
+    src.close()
+    return ink, clip
+
+
+def _shape_score(page, span, target, clip, face):
+    """Overlap between the PDF's glyphs and the same glyphs drawn with `face`
+    at the same positions (1 = identical)."""
+    if face.index or face.variable:
+        return 0.0  # can't draw a .ttc member or a variable instance here
+    ref = pymupdf.open()
+    rp = ref.new_page(width=page.rect.width, height=page.rect.height)
+    try:
+        for c in span["chars"]:
+            if c["c"].strip():
+                rp.insert_text(c["origin"], c["c"], fontsize=span["size"], fontname="F0", fontfile=face.path)
+        ink = _ink(rp, clip)
+    except Exception:
+        return 0.0
+    finally:
+        ref.close()
+    if ink.shape != target.shape or max(ink.sum(), target.sum()) == 0:
+        return 0.0
+    return float(np.minimum(ink, target).sum() / np.maximum(ink, target).sum())
+
+
+def _pick_by_shape(page, span, tied, families_seen):
+    """Among faces whose widths fit equally well, the one whose glyphs look
+    most like the PDF's. A family already chosen for this document wins ties
+    again, so the comparison runs once per family rather than per page."""
+    known = [m for m in tied if m.face.family in families_seen]
+    if known:
+        tied = known
+    target, clip = _pdf_ink(page, span)
+    by_family = {}
+    for m in tied:
+        by_family.setdefault(m.face.family, []).append(m)
+    if len(by_family) > 1:
+        # choose the family from its common weights first, then the weight
+        common = ("Regular", "Medium", "Bold", "Italic", "Bold Italic")
+        best_of = {f: max((m for m in ms if m.face.style in common), default=ms[0],
+                          key=lambda m: _shape_score(page, span, target, clip, m.face))
+                   for f, ms in list(by_family.items())[:12]}
+        family = max(best_of, key=lambda f: _shape_score(page, span, target, clip, best_of[f].face))
+        tied = by_family[family]
+    return max(tied[:24], key=lambda m: _shape_score(page, span, target, clip, m.face))
+
+
+def _identify_fonts(doc, pages_blocks):
+    """Name each nameless font by matching its glyph widths against installed
+    faces; matched spans get the exact face and exact letter-spacing. When
+    several families fit (monospace fonts all share one width), the glyph
+    shapes decide."""
+    samples, slant, longest = {}, {}, {}
+    for page_no, blocks in enumerate(pages_blocks):
+        for l, s in _spans([blocks]):
+            if _anonymous(s["font"]) and l["dir"] == (1.0, 0.0):
+                samples.setdefault(s["font"], []).extend(_advance_samples(s))
+                slant.setdefault(s["font"], s["slanted"] if s["weight"] else None)
+                if len(s["chars"]) > len(longest.get(s["font"], (0, {"chars": []}))[1]["chars"]):
+                    longest[s["font"]] = (page_no, s)
+    matches, families_seen = {}, set()
+    for f in sorted(samples, key=lambda f: -len(samples[f])):
+        tied = fonts.identify(samples[f][:300], slant.get(f))
+        if not tied:
+            continue
+        if len({m.face.family for m in tied}) > 1 or len(tied) > 1 and tied[0].face.mono:
+            page_no, span = longest[f]
+            best = _pick_by_shape(doc[page_no], span, tied, families_seen)
+        else:
+            best = tied[0]
+        families_seen.add(best.face.family)
+        matches[f] = best
+    for l, s in _spans(pages_blocks):
+        m = matches.get(s["font"])
+        if not m:
+            continue
+        s["face"] = m.face
+        # letter-spacing from this span's own glyphs against the real widths
+        res = [adv - m.face.adv[cp] * size for cp, size, adv, _ in _advance_samples(s) if cp in m.face.adv]
+        t = statistics.median(res) if len(res) >= 2 else m.tracking * s["size"]
+        s["tracking"] = t if abs(t) > 0.004 * s["size"] else 0
+    return matches
 
 
 def _assign_styles(pages_blocks, stats):
@@ -631,7 +749,7 @@ def _add_text(slide, blocks, fit):
 # --------------------------------------------------------------------------- #
 # Build + Keynote
 # --------------------------------------------------------------------------- #
-def pdf_to_pptx(pdf_path, pptx_path, separate_images=False, progress=None):
+def pdf_to_pptx(pdf_path, pptx_path, separate_images=False, progress=None, font_report=None):
     doc = pymupdf.open(pdf_path)
     if doc.needs_pass:
         raise ValueError("PDF is password protected")
@@ -651,6 +769,10 @@ def pdf_to_pptx(pdf_path, pptx_path, separate_images=False, progress=None):
     for page, blocks in zip(doc, pages_blocks):
         _measure_fonts(page, blocks, stats)
     _assign_styles(pages_blocks, stats)
+    matched = _identify_fonts(doc, pages_blocks)
+    if font_report is not None:
+        font_report.update(identified=sorted({m.face.keynote_name + (" Italic" if m.face.italic else "")
+                                              for m in matched.values()}))
 
     for i, page in enumerate(doc):
         if progress:
@@ -684,7 +806,15 @@ def pptx_to_keynote(pptx_path, key_path, png_dir=None):
         set inFile to POSIX file (item 1 of argv)
         set outFile to POSIX file (item 2 of argv)
         tell application "Keynote"
-            set d to open inFile
+            set openedItem to open inFile
+            -- `open` can hand back an import-warnings object instead of the
+            -- document; the document it opened is then the front one
+            if class of openedItem is document then
+                set d to openedItem
+            else
+                delay 1
+                set d to front document
+            end if
             save d in outFile
             if (count of argv) > 2 then
                 export d to POSIX file (item 3 of argv) as slide images
@@ -698,14 +828,19 @@ def pptx_to_keynote(pptx_path, key_path, png_dir=None):
     args = ["osascript", "-e", script, str(Path(pptx_path).resolve()), str(Path(key_path).resolve())]
     if png_dir:
         args.append(str(Path(png_dir).resolve()))
-    for attempt in range(2):
+    for attempt in range(3):
         _wait_for_keynote()
         r = subprocess.run(args, capture_output=True, text=True, timeout=900)
         if not r.returncode:
             return
-        # -600/-609: Keynote quit or restarted under us; relaunch and retry once
-        if attempt == 0 and re.search(r"\((-600|-609)\)", r.stderr):
+        # -600/-609: Keynote quit or crashed. -1700/-1708: its scripting got
+        # into a bad state (seen after crashes). A clean relaunch fixes both.
+        if attempt < 2 and re.search(r"\((-600|-609|-1700|-1708)\)", r.stderr):
+            subprocess.run(["osascript", "-e", 'tell application "Keynote" to quit saving no'],
+                           capture_output=True, timeout=30)
             time.sleep(3)
+            subprocess.run(["pkill", "-x", "Keynote"], capture_output=True)
+            time.sleep(1)
             continue
         raise RuntimeError(f"Keynote conversion failed: {r.stderr.strip()}")
 
@@ -759,8 +894,7 @@ def missing_fonts(pdf_path):
     for page in doc:
         for f in page.get_fonts():
             if _anonymous(f[3]):
-                missing.add("unnamed embedded fonts (approximated)")
-                continue
+                continue  # identified from glyph widths during conversion
             _, _, _, _, exact = _font_info(f[3], 0)
             if not exact:
                 base = re.split(r"[-,]", f[3].split("+")[-1])[0]
@@ -771,13 +905,15 @@ def missing_fonts(pdf_path):
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
-def convert(pdf_path, key_path, separate_images=False, verify=True, progress=None, preview_dir=None):
-    """PDF -> .key. Returns a list of SlideReport (empty if verify is off)."""
+def convert(pdf_path, key_path, separate_images=False, verify=True, progress=None, preview_dir=None,
+            font_report=None):
+    """PDF -> .key. Returns a list of SlideReport (empty if verify is off).
+    Pass a dict as font_report to receive the fonts identified for nameless fonts."""
     pdf_path, key_path = Path(pdf_path).resolve(), Path(key_path).resolve()
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         pptx = tmp / "deck.pptx"
-        pdf_to_pptx(pdf_path, pptx, separate_images, progress)
+        pdf_to_pptx(pdf_path, pptx, separate_images, progress, font_report)
         if progress:
             progress("Importing into Keynote", 0.8)
         png_dir = tmp / "slides" if verify else None
