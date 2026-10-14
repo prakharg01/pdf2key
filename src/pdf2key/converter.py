@@ -749,17 +749,23 @@ def _add_text(slide, blocks, fit):
 # --------------------------------------------------------------------------- #
 # Build + Keynote
 # --------------------------------------------------------------------------- #
-def pdf_to_pptx(pdf_path, pptx_path, separate_images=False, progress=None, font_report=None):
+def open_pdf(pdf_path):
     doc = pymupdf.open(pdf_path)
     if doc.needs_pass:
         raise ValueError("PDF is password protected")
     if not len(doc):
         raise ValueError("PDF has no pages")
-    prs = Presentation()
-    first = doc[0].rect
-    prs.slide_width, prs.slide_height = _emu(first.width), _emu(first.height)
-    blank = prs.slide_layouts[6]
+    return doc
 
+
+def new_presentation(width_pt, height_pt):
+    prs = Presentation()
+    prs.slide_width, prs.slide_height = _emu(width_pt), _emu(height_pt)
+    return prs
+
+
+def analyze_text(doc, progress=None, font_report=None):
+    """Text of every page, rebuilt and with fonts resolved: one block list per page."""
     pages_blocks, stats = [], {}
     for i, page in enumerate(doc):
         if progress:
@@ -773,6 +779,19 @@ def pdf_to_pptx(pdf_path, pptx_path, separate_images=False, progress=None, font_
     if font_report is not None:
         font_report.update(identified=sorted({m.face.keynote_name + (" Italic" if m.face.italic else "")
                                               for m in matched.values()}))
+    return pages_blocks
+
+
+def add_text(slide, blocks, page_rect, slide_w, slide_h):
+    _add_text(slide, blocks, _Fit(page_rect, slide_w, slide_h))
+
+
+def pdf_to_pptx(pdf_path, pptx_path, separate_images=False, progress=None, font_report=None):
+    doc = open_pdf(pdf_path)
+    first = doc[0].rect
+    prs = new_presentation(first.width, first.height)
+    blank = prs.slide_layouts[6]
+    pages_blocks = analyze_text(doc, progress, font_report)
 
     for i, page in enumerate(doc):
         if progress:
@@ -806,17 +825,20 @@ def pptx_to_keynote(pptx_path, key_path, png_dir=None):
         set inFile to POSIX file (item 1 of argv)
         set outFile to POSIX file (item 2 of argv)
         tell application "Keynote"
-            set openedItem to open inFile
-            -- `open` can hand back an import-warnings object instead of the
-            -- document; the document it opened is then the front one
-            if class of openedItem is document then
-                set d to openedItem
-            else
-                delay 1
-                set d to front document
-            end if
+            open inFile
+            -- `open` can return an import-warnings object instead of the
+            -- document, so look the document up by name once it appears
+            set d to missing value
+            repeat 150 times
+                try
+                    set d to first document whose name is (item 4 of argv)
+                    exit repeat
+                end try
+                delay 0.2
+            end repeat
+            if d is missing value then error "Keynote did not open the presentation"
             save d in outFile
-            if (count of argv) > 2 then
+            if (item 3 of argv) is not "" then
                 export d to POSIX file (item 3 of argv) as slide images
             end if
             close d saving no
@@ -825,9 +847,8 @@ def pptx_to_keynote(pptx_path, key_path, png_dir=None):
     """
     # Keynote resolves relative paths against its own working directory (/),
     # and crashes when it can't write there, so always pass absolute paths.
-    args = ["osascript", "-e", script, str(Path(pptx_path).resolve()), str(Path(key_path).resolve())]
-    if png_dir:
-        args.append(str(Path(png_dir).resolve()))
+    args = ["osascript", "-e", script, str(Path(pptx_path).resolve()), str(Path(key_path).resolve()),
+            str(Path(png_dir).resolve()) if png_dir else "", Path(pptx_path).stem]
     for attempt in range(3):
         _wait_for_keynote()
         r = subprocess.run(args, capture_output=True, text=True, timeout=900)
@@ -841,6 +862,8 @@ def pptx_to_keynote(pptx_path, key_path, png_dir=None):
             time.sleep(3)
             subprocess.run(["pkill", "-x", "Keynote"], capture_output=True)
             time.sleep(1)
+            # start fresh: restoring windows from a crashed session can wedge it again
+            subprocess.run(["open", "-F", "-g", "-a", "Keynote"], capture_output=True)
             continue
         raise RuntimeError(f"Keynote conversion failed: {r.stderr.strip()}")
 
