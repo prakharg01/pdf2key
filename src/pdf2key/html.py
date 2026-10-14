@@ -36,6 +36,7 @@ from PIL import Image
 from pptx.oxml.ns import qn
 
 from . import converter
+from . import report as reporting
 
 PX_TO_PT = 0.75
 SCALE = 2           # screenshot pixels per CSS pixel
@@ -270,23 +271,24 @@ def _displayed_rect(item):
     return (box["x"] + _parse_pos(px, bw - w), box["y"] + _parse_pos(py, bh - h), w, h)
 
 
-def _add_picture(slide, item, base_dir, layer_png=None):
-    """A real picture: original file, cropped like the browser crops it."""
+def _photo_name(item):
+    name = Path(unquote(urlparse(item["src"]).path)).name if not item["src"].startswith("data:") else "image"
+    return f"Photo · {name}"
+
+
+def _add_picture(shapes, item, base_dir, layer_png=None):
+    """A real picture: original file, cropped like the browser crops it.
+    Returns (shape, visible rect in CSS px) or None."""
     k = PX_TO_PT
     if layer_png is not None:  # captured on its own (effects Keynote can't do)
         bbox = layer_png.getbbox()
         if not bbox:
-            return
-        crop = layer_png.crop(bbox)
-        buf = BytesIO()
-        crop.save(buf, "PNG")
-        x0, y0 = bbox[0] / SCALE, bbox[1] / SCALE
-        slide.shapes.add_picture(BytesIO(buf.getvalue()), converter._emu(x0 * k), converter._emu(y0 * k),
-                                 converter._emu(crop.width / SCALE * k), converter._emu(crop.height / SCALE * k))
-        return
+            return None
+        pic = _add_png(shapes, bbox, layer_png.crop(bbox), _photo_name(item))
+        return pic, tuple(v / SCALE for v in bbox)
     data = _image_bytes(item["src"], base_dir)
     if not data:
-        return
+        return None
     img = Image.open(BytesIO(data))
     item.setdefault("natural", list(img.size))
     dx, dy, dw, dh = _displayed_rect(item)
@@ -297,7 +299,7 @@ def _add_picture(slide, item, base_dir, layer_png=None):
     vx1 = min(dx + dw, box["x"] + box["w"], c["x"] + c["w"])
     vy1 = min(dy + dh, box["y"] + box["h"], c["y"] + c["h"])
     if vx1 - vx0 < 0.5 or vy1 - vy0 < 0.5:
-        return
+        return None
 
     # shrink huge originals to what the slide can show at retina density
     need = max((vx1 - vx0) / dw * img.width, (vy1 - vy0) / dh * img.height)
@@ -312,8 +314,9 @@ def _add_picture(slide, item, base_dir, layer_png=None):
             img.convert("RGB").save(buf, "JPEG", quality=90)
         data = buf.getvalue()
 
-    pic = slide.shapes.add_picture(BytesIO(data), converter._emu(vx0 * k), converter._emu(vy0 * k),
-                                   converter._emu((vx1 - vx0) * k), converter._emu((vy1 - vy0) * k))
+    pic = shapes.add_picture(BytesIO(data), converter._emu(vx0 * k), converter._emu(vy0 * k),
+                             converter._emu((vx1 - vx0) * k), converter._emu((vy1 - vy0) * k))
+    pic.name = _photo_name(item)
     pic.crop_left = (vx0 - dx) / dw
     pic.crop_top = (vy0 - dy) / dh
     pic.crop_right = (dx + dw - vx1) / dw
@@ -333,21 +336,107 @@ def _add_picture(slide, item, base_dir, layer_png=None):
             av = geom.makeelement(qn("a:avLst"), {})
             geom.append(av)
         av.append(av.makeelement(qn("a:gd"), {"name": "adj", "fmla": f"val {round(min(0.5, radius / short) * 100000)}"}))
+    return pic, (vx0, vy0, vx1, vy1)
 
 
-def _add_layer(slide, png):
+MAX_PIECES = 80
+
+
+def _add_png(shapes, bbox, img, name):
+    """Place an RGBA crop whose top-left sits at screenshot pixel bbox[:2]."""
+    buf = BytesIO()
+    img.save(buf, "PNG", optimize=True)
+    k = PX_TO_PT / SCALE
+    pic = shapes.add_picture(BytesIO(buf.getvalue()), converter._emu(bbox[0] * k), converter._emu(bbox[1] * k),
+                             converter._emu(img.width * k), converter._emu(img.height * k))
+    pic.name = name
+    return pic
+
+
+def _pieces(png):
+    """Split a decoration layer into its separate islands of paint (a card, an
+    arrow, a badge, an overlay), each as (bbox, cropped RGBA), so they become
+    separate objects. Parts closer than ~2 CSS px stay together."""
+    import numpy as np
+    from scipy import ndimage
+
     bbox = png.getbbox()
     if not bbox:
-        return
-    crop = png.crop(bbox)
-    buf = BytesIO()
-    crop.save(buf, "PNG", optimize=True)
-    k = PX_TO_PT / SCALE
-    slide.shapes.add_picture(BytesIO(buf.getvalue()), converter._emu(bbox[0] * k), converter._emu(bbox[1] * k),
-                             converter._emu(crop.width * k), converter._emu(crop.height * k))
+        return []
+    arr = np.asarray(png)
+    ink = arr[:, :, 3] > 8
+    labels, n = ndimage.label(ndimage.binary_dilation(ink, iterations=2 * SCALE))
+    if n <= 1 or n > MAX_PIECES:
+        return [(bbox, png.crop(bbox))]
+    out = []
+    for k, sl in enumerate(ndimage.find_objects(labels), start=1):
+        ys, xs = sl
+        piece = arr[ys, xs].copy()
+        piece[labels[ys, xs] != k, 3] = 0  # parts of other islands inside this box
+        img = Image.fromarray(piece, "RGBA")
+        inner = img.getbbox()
+        if not inner:
+            continue
+        x0, y0 = xs.start + inner[0], ys.start + inner[1]
+        out.append(((x0, y0, xs.start + inner[2], ys.start + inner[3]), img.crop(inner)))
+    return out
 
 
-def html_to_pptx(html_path, pptx_path, pdf_out, progress=None, font_report=None):
+def _piece_name(bbox, width, height):
+    w, h = (bbox[2] - bbox[0]) / SCALE, (bbox[3] - bbox[1]) / SCALE
+    if w >= 0.95 * width and h >= 0.95 * height:
+        return "Background"
+    return "Shape"
+
+
+def _inside(bbox, rect, slack=2):
+    """Screenshot-pixel bbox lies within a CSS-px rect."""
+    x0, y0, x1, y1 = (v / SCALE for v in bbox)
+    return x0 >= rect[0] - slack and y0 >= rect[1] - slack and x1 <= rect[2] + slack and y1 <= rect[3] + slack
+
+
+def _build_slide(slide, layers, base_dir, width, height, report=None):
+    """Add the slide's layers bottom to top. A photo and the overlays that sit
+    only on it (a card's gradient, a caption plate) become one group, so they
+    move together and the photo stays reachable by double-clicking."""
+    def split(layer):
+        if len(layer) > 2:  # full-slide paint stays whole
+            bbox = layer[1].getbbox()
+            return [(bbox, layer[1].crop(bbox))] if bbox else []
+        return _pieces(layer[1])
+
+    pieces = [split(l) if l[0] == "layer" else None for l in layers]
+    first = True
+    for i, layer in enumerate(layers):
+        if layer[0] == "layer":
+            for bbox, img in pieces[i]:
+                name = _piece_name(bbox, width, height)
+                if name == "Background" and not first:
+                    name = "Overlay"
+                first = False
+                _add_png(slide.shapes, bbox, img, name)
+            continue
+        first = False
+        nxt = pieces[i + 1] if i + 1 < len(layers) and layers[i + 1][0] == "layer" else []
+        placed = _add_picture(slide.shapes, layer[1], base_dir, layer[2])
+        if not placed:
+            if report is not None and layer[2] is None:
+                report["warnings"].append(f"image not found: {layer[1]['src'][:120]}")
+            continue
+        pic, rect = placed
+        on_top = [pc for pc in nxt if _inside(pc[0], rect)]
+        if on_top:
+            group = slide.shapes.add_group_shape()
+            group.name = pic.name.replace("Photo", "Photo group")
+            group.shapes._spTree.append(pic._element)  # move the photo into the group
+            for bbox, img in on_top:
+                _add_png(group.shapes, bbox, img, "Overlay")
+            group.shapes._recalculate_extents()
+            for pc in on_top:
+                nxt.remove(pc)
+
+
+def html_to_pptx(html_path, pptx_path, pdf_out, progress=None, report=None):
     """Build the .pptx from an HTML deck (or a zip of one). Also writes the
     deck as a PDF to `pdf_out` (used for the text and the accuracy check)."""
     from playwright.sync_api import sync_playwright
@@ -397,19 +486,37 @@ def html_to_pptx(html_path, pptx_path, pdf_out, progress=None, font_report=None)
                 slide_page.add_style_tag(content=HIDE_TEXT_CSS)
                 bg_image_ids = [it["id"] for it in items if it["kind"] == "bgimage"]
                 layers, run = [], []
+
+                def flush():
+                    # Full-slide paint (the background, a tint over everything) gets its
+                    # own layer, in place; otherwise it would fuse every shape above it
+                    # into one picture when the layer is split into pieces.
+                    sub = []
+                    for it in run:
+                        r = it["rect"]
+                        if r["w"] * r["h"] >= 0.9 * width * height:
+                            if sub:
+                                layers.append(("layer", _render_layer(slide_page, sub, bg_image_ids)))
+                                sub = []
+                            layers.append(("layer", _render_layer(slide_page, [it["id"]], bg_image_ids), "full"))
+                        else:
+                            sub.append(it["id"])
+                    if sub:
+                        layers.append(("layer", _render_layer(slide_page, sub, bg_image_ids)))
+                    run.clear()
+
                 for it in items:
                     if it["kind"] == "decoration":
-                        run.append(it["id"])
+                        run.append(it)
                         continue
                     if run:
-                        layers.append(("layer", _render_layer(slide_page, run, bg_image_ids)))
-                        run = []
+                        flush()
                     if it["complex"]:
                         layers.append(("picture", it, _render_layer(slide_page, [it["id"]], [])))
                     else:
                         layers.append(("picture", it, None))
                 if run:
-                    layers.append(("layer", _render_layer(slide_page, run, bg_image_ids)))
+                    flush()
                 plans.append(layers)
             pdf.save(pdf_out)
         finally:
@@ -418,7 +525,7 @@ def html_to_pptx(html_path, pptx_path, pdf_out, progress=None, font_report=None)
                 slide_file.unlink(missing_ok=True)
 
         doc = converter.open_pdf(pdf_out)
-        pages_blocks = converter.analyze_text(doc, None, font_report)
+        pages_blocks = converter.analyze_text(doc, None, report)
         w_pt, h_pt = width * PX_TO_PT, height * PX_TO_PT
         prs = converter.new_presentation(w_pt, h_pt)
         blank = prs.slide_layouts[6]
@@ -426,28 +533,30 @@ def html_to_pptx(html_path, pptx_path, pdf_out, progress=None, font_report=None)
             if progress:
                 progress(f"Building slide {i + 1} of {len(plans)}", 0.4 + 0.3 * i / len(plans))
             slide = prs.slides.add_slide(blank)
-            for layer in layers:
-                if layer[0] == "layer":
-                    _add_layer(slide, layer[1])
-                else:
-                    _add_picture(slide, layer[1], base_dir, layer[2])
-            converter.add_text(slide, pages_blocks[i], doc[i].rect, w_pt, h_pt)
+            _build_slide(slide, layers, base_dir, width, height, report)
+            converter.add_text(slide, pages_blocks[i], doc[i].rect, w_pt, h_pt, report)
+        reporting.record_objects(report, prs)
         prs.save(pptx_path)
 
 
-def convert_html(html_path, key_path, verify=True, progress=None, preview_dir=None, font_report=None):
-    """HTML deck (or zip) -> .key. Returns SlideReports like converter.convert."""
+def convert_html(html_path, key_path, verify=True, progress=None, preview_dir=None, report=None):
+    """HTML deck (or zip/folder) -> .key. Returns SlideReports like converter.convert.
+    Pass a dict from report.new() as `report` to receive the status report."""
+    import time
+    started = time.time()
     key_path = Path(key_path).resolve()
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         pptx, pdf = tmp / "deck.pptx", tmp / "deck.pdf"
-        html_to_pptx(html_path, pptx, pdf, progress, font_report)
+        html_to_pptx(html_path, pptx, pdf, progress, report)
         if progress:
             progress("Importing into Keynote", 0.8)
         png_dir = tmp / "slides" if verify else None
         converter.pptx_to_keynote(pptx, key_path, png_dir)
-        if not verify:
-            return []
-        if progress:
-            progress("Comparing slides with the original", 0.95)
-        return converter.compare(pdf, png_dir, preview_dir or tmp / "preview")
+        slides = []
+        if verify:
+            if progress:
+                progress("Comparing slides with the original", 0.95)
+            slides = converter.compare(pdf, png_dir, preview_dir or tmp / "preview")
+        reporting.record_accuracy(report, slides, time.time() - started)
+        return slides

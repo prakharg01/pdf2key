@@ -48,13 +48,24 @@ def test_html_deck_gets_movable_cropped_pictures_under_overlays(chrome, tmp_path
     slides = Presentation(out).slides
     assert len(slides) == 2
     shapes = list(slides[0].shapes)
-    pics = [s for s in shapes if s.shape_type == 13]
-    photo = next(p for p in pics if p.crop_left > 0)          # the <img>, cropped by object-fit
+    # the photo and the gradient lying only on it are grouped: photo first, overlay above
+    group = next(s for s in shapes if s.shape_type == 6)
+    photo, overlay = list(group.shapes)
+    assert photo.name == "Photo · photo.png" and overlay.name == "Overlay"
     assert photo.crop_left == pytest.approx(0.25, abs=0.01) and photo.crop_right == pytest.approx(0.25, abs=0.01)
     assert photo.left == pytest.approx(100 * EMU_PER_PX, rel=0.01)
-    overlay = shapes.index(photo) + 1                          # the gradient is a layer above it
-    assert shapes[overlay].shape_type == 13
+    assert shapes[0].name == "Background"
     assert any(s.has_text_frame and "Hello deck" in s.text_frame.text for s in shapes)
+
+
+def test_decoration_layers_split_into_separate_pieces():
+    from pdf2key.html import SCALE, _pieces
+    img = Image.new("RGBA", (400 * SCALE, 200 * SCALE), (0, 0, 0, 0))
+    img.paste((255, 0, 0, 255), (10 * SCALE, 10 * SCALE, 60 * SCALE, 60 * SCALE))     # a card
+    img.paste((0, 0, 255, 255), (200 * SCALE, 100 * SCALE, 300 * SCALE, 104 * SCALE))  # an arrow shaft
+    pieces = _pieces(img)
+    assert len(pieces) == 2
+    assert sorted(p[0][0] // SCALE for p in pieces) == [10, 200]
 
 
 def test_find_html_accepts_zip_folder_or_file(tmp_path):
