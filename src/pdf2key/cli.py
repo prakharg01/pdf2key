@@ -11,7 +11,8 @@ def main(argv=None):
     ap.add_argument("pdf", help="input PDF")
     ap.add_argument("output", nargs="?", help="output .key (default: next to the PDF)")
     ap.add_argument("--pptx-only", action="store_true", help="write a .pptx and skip Keynote")
-    ap.add_argument("--no-background", action="store_true", help="don't rasterize vector line art")
+    ap.add_argument("--separate-images", action="store_true",
+                    help="make pictures individually movable (less faithful for cropped/masked images)")
     ap.add_argument("--no-verify", action="store_true", help="skip the PDF-vs-Keynote comparison")
     args = ap.parse_args(argv)
 
@@ -27,10 +28,10 @@ def main(argv=None):
 
     if args.pptx_only:
         pptx = out.with_suffix(".pptx")
-        pdf_to_pptx(pdf, pptx, not args.no_background, log)
+        pdf_to_pptx(pdf, pptx, args.separate_images, log)
         print(f"Wrote {pptx}")
         return
-    reports = convert(pdf, out, not args.no_background, not args.no_verify, log)
+    reports = convert(pdf, out, args.separate_images, not args.no_verify, log)
     for r in reports:
         print(f"  slide {r.page}: {r.match:.2f}% match, {r.off_pixels:.2f}% of pixels differ")
     print(f"Wrote {out}")

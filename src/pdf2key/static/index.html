@@ -38,7 +38,7 @@ button.ghost{background:none;border:1px solid var(--line);color:var(--ink);borde
 
 <div id="drop"><b>Drop a PDF here or click to choose</b><span>Converted locally on this Mac, nothing is uploaded anywhere</span>
 <input id="file" type="file" accept="application/pdf,.pdf" class="hide"></div>
-<label class="opt"><input id="bg" type="checkbox" checked> Keep vector line art, gradients and shapes (flattened into one transparent image)</label>
+<label class="opt"><input id="bg" type="checkbox"> Make pictures individually movable (less faithful when the PDF crops or layers images)</label>
 
 <div id="work" class="card hide" style="margin-top:22px">
   <div id="msg">Starting…</div><div class="bar"><i id="fill"></i></div>
@@ -67,7 +67,7 @@ async function start(f){
   drop.classList.add('hide');$('bg').parentElement.classList.add('hide');
   $('work').classList.remove('hide');$('result').classList.add('hide');
   $('err').classList.add('hide');$('msg').textContent='Uploading…';$('fill').style.width='2%';
-  const fd=new FormData();fd.append('pdf',f);fd.append('background',$('bg').checked?'1':'0');
+  const fd=new FormData();fd.append('pdf',f);fd.append('separate_images',$('bg').checked?'1':'0');
   const r=await fetch('/convert',{method:'POST',body:fd});const j=await r.json();
   if(!r.ok){fail(j.error);return}
   poll(j.id);

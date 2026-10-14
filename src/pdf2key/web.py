@@ -34,7 +34,7 @@ def run_job(job_id):
         job["message"] = "Waiting for Keynote"
         with keynote_lock:
             reports = converter.convert(
-                job["pdf"], job["key"], background=job["background"], verify=True,
+                job["pdf"], job["key"], separate_images=job["separate_images"], verify=True,
                 progress=progress, preview_dir=job["dir"] / "preview")
         job["reports"] = [r.__dict__ for r in reports]
         job.update(state="done", message="Done", progress=1)
@@ -56,7 +56,7 @@ def convert():
     jobs[job_id] = dict(
         state="running", message="Starting", progress=0, pdf=pdf, dir=job_dir,
         key=job_dir / f"{stem}.key", name=f"{stem}.key",
-        background=request.form.get("background", "1") == "1", reports=[], missing_fonts=[])
+        separate_images=request.form.get("separate_images") == "1", reports=[], missing_fonts=[])
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return jsonify(id=job_id)
 
