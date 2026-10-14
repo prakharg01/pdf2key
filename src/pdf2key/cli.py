@@ -7,8 +7,9 @@ from .converter import convert, missing_fonts, pdf_to_pptx
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="pdf2key", description="Convert a PDF into an editable Keynote presentation.")
-    ap.add_argument("pdf", help="input PDF")
+    ap = argparse.ArgumentParser(prog="pdf2key", description="Convert a PDF into an editable Keynote presentation. "
+                                 "Experimental: give an HTML deck (or a .zip of one) to also get movable pictures.")
+    ap.add_argument("pdf", help="input PDF, or HTML deck / .zip export (experimental)")
     ap.add_argument("output", nargs="?", help="output .key (default: next to the PDF)")
     ap.add_argument("--pptx-only", action="store_true", help="write a .pptx and skip Keynote")
     ap.add_argument("--separate-images", action="store_true",
@@ -21,6 +22,17 @@ def main(argv=None):
         ap.error(f"{pdf} not found")
     out = Path(args.output).resolve() if args.output else pdf.with_suffix(".key")
     log = lambda msg, frac: print(f"  {msg}", file=sys.stderr)
+
+    if pdf.suffix.lower() in (".html", ".htm", ".zip"):
+        from .html import convert_html
+        font_report = {}
+        reports = convert_html(pdf, out, not args.no_verify, log, font_report=font_report)
+        if font_report.get("identified"):
+            print(f"  fonts recognised from glyphs: {', '.join(font_report['identified'])}", file=sys.stderr)
+        for r in reports:
+            print(f"  slide {r.page}: {r.match:.2f}% match, {r.off_pixels:.2f}% of pixels differ")
+        print(f"Wrote {out}")
+        return
 
     fonts = missing_fonts(pdf)
     if fonts:

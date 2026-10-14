@@ -30,13 +30,19 @@ def run_job(job_id):
         job.update(message=message, progress=fraction)
 
     try:
-        job["missing_fonts"] = converter.missing_fonts(job["pdf"])
-        job["message"] = "Waiting for Keynote"
         font_report = {}
-        with keynote_lock:
-            reports = converter.convert(
-                job["pdf"], job["key"], separate_images=job["separate_images"], verify=True,
-                progress=progress, preview_dir=job["dir"] / "preview", font_report=font_report)
+        job["message"] = "Waiting for Keynote"
+        if job["pdf"].suffix.lower() == ".pdf":
+            job["missing_fonts"] = converter.missing_fonts(job["pdf"])
+            with keynote_lock:
+                reports = converter.convert(
+                    job["pdf"], job["key"], separate_images=job["separate_images"], verify=True,
+                    progress=progress, preview_dir=job["dir"] / "preview", font_report=font_report)
+        else:  # HTML deck export (.zip / .html): experimental, movable pictures
+            from .html import convert_html
+            with keynote_lock:
+                reports = convert_html(job["pdf"], job["key"], verify=True, progress=progress,
+                                       preview_dir=job["dir"] / "preview", font_report=font_report)
         job["identified_fonts"] = font_report.get("identified", [])
         job["reports"] = [r.__dict__ for r in reports]
         job.update(state="done", message="Done", progress=1)
@@ -47,13 +53,13 @@ def run_job(job_id):
 @app.post("/convert")
 def convert():
     f = request.files.get("pdf")
-    if not f or not f.filename.lower().endswith(".pdf"):
-        return jsonify(error="Please upload a PDF file."), 400
+    if not f or not f.filename.lower().endswith((".pdf", ".zip", ".html", ".htm")):
+        return jsonify(error="Please upload a PDF, or an HTML deck export (.zip)."), 400
     job_id = uuid.uuid4().hex
     job_dir = WORK_DIR / job_id
     job_dir.mkdir()
     stem = Path(secure_filename(f.filename)).stem or "presentation"
-    pdf = job_dir / f"{stem}.pdf"
+    pdf = job_dir / f"{stem}{Path(f.filename).suffix.lower()}"
     f.save(pdf)
     jobs[job_id] = dict(
         state="running", message="Starting", progress=0, pdf=pdf, dir=job_dir,

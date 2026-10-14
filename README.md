@@ -80,6 +80,24 @@ How the text is rebuilt:
 
 Pages that are a different size from the first page are scaled to fit the slide.
 
+### Experimental: HTML decks, with movable pictures
+
+If you have the HTML a deck was made from (for example, a Claude Design export `.zip`), give pdf2key that instead of the PDF. You can drop it in the web app or run:
+
+```bash
+.venv/bin/pip install -e ".[html]"     # Playwright; drives your installed Google Chrome
+.venv/bin/pdf2key "Short Deck.zip" deck.key
+```
+
+A PDF only records "draw this image here". The HTML knows which element is a photo, how it's cropped, and what's layered over it, so every photo becomes its own movable, resizable Keynote picture:
+
+1. Chrome lays out each `<section>` (one per slide) at the deck's size with the deck's fonts.
+2. Every element is listed in paint order. Each `<img>` or CSS background image becomes a Keynote picture made from the **original file**. It keeps the crop the browser applies (`object-fit`, `object-position`, `background-size`, overflow clipping), along with opacity and rounded corners. Pictures with effects Keynote can't reproduce (filters, masks, rotation, blend modes) are captured on their own, still as separate pictures.
+3. Each run of decorations between two pictures (backgrounds, cards, gradients, borders, SVG) becomes one transparent layer cut to its content. Overlays therefore stay above the photos they cover.
+4. Chrome also prints the slides to PDF, and the regular text pipeline puts editable text on top.
+
+On the sample deck this produces about 200 movable pictures across 25 slides, with about the same accuracy as the PDF route.
+
 ### `--separate-images`
 
 This mode places each embedded image as its own picture, on top of a background colour and under a transparent line-art overlay, so you can drag photos around. It can't reproduce PDF stacking, clipping or opacity, so use it only for simple documents.
@@ -102,6 +120,7 @@ The tests cover the PDF → `.pptx` stage and don't need Keynote. Put real PDFs 
 src/pdf2key/
   converter.py   conversion engine and accuracy check
   fonts.py       installed-font catalog and glyph-width font matching
+  html.py        experimental HTML deck input (movable pictures)
   cli.py         `pdf2key` command
   web.py         `pdf2key-web` Flask app
   static/        web UI
