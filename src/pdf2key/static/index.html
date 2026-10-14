@@ -36,8 +36,8 @@ button.ghost{background:none;border:1px solid var(--line);color:var(--ink);borde
 <h1>PDF to Keynote</h1>
 <p class="sub">Upload a PDF and get an editable Keynote file: real text boxes, original-quality pictures, matching layout.</p>
 
-<div id="drop"><b>Drop a PDF here or click to choose</b><span>Or an HTML deck export (.zip) to also get movable pictures (experimental). Converted locally on this Mac, nothing is uploaded anywhere</span>
-<input id="file" type="file" accept="application/pdf,.pdf,.zip,.html,.htm" class="hide"></div>
+<div id="drop"><b>Drop a PDF or a deck export .zip here, or click to choose</b><span>A .zip of the HTML deck (e.g. a Claude Design export) also gives you movable pictures (experimental). Converted locally on this Mac, nothing is uploaded anywhere</span>
+<input id="file" type="file" accept="application/pdf,.pdf,.zip" class="hide"></div>
 <label class="opt"><input id="bg" type="checkbox"> Make pictures individually movable (less faithful when the PDF crops or layers images)</label>
 
 <div id="work" class="card hide" style="margin-top:22px">
@@ -64,7 +64,7 @@ drop.addEventListener('drop',ev=>{const f=ev.dataTransfer.files[0];f&&start(f)})
 $('again').onclick=()=>{$('result').classList.add('hide');$('work').classList.add('hide');drop.classList.remove('hide');$('bg').parentElement.classList.remove('hide');file.value=''};
 
 async function start(f){
-  if(!/\.(pdf|zip|html?)$/i.test(f.name)){alert('Please choose a PDF, or an HTML deck export (.zip).');return}
+  if(!/\.(pdf|zip)$/i.test(f.name)){alert('Please choose a PDF, or an HTML deck export as its .zip.');return}
   drop.classList.add('hide');$('bg').parentElement.classList.add('hide');
   $('work').classList.remove('hide');$('result').classList.add('hide');
   $('err').classList.add('hide');$('msg').textContent='Uploading…';$('fill').style.width='2%';

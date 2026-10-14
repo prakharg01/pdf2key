@@ -53,8 +53,10 @@ def run_job(job_id):
 @app.post("/convert")
 def convert():
     f = request.files.get("pdf")
-    if not f or not f.filename.lower().endswith((".pdf", ".zip", ".html", ".htm")):
-        return jsonify(error="Please upload a PDF, or an HTML deck export (.zip)."), 400
+    # an uploaded .html would arrive without the images and styles beside it,
+    # so HTML decks come in as the exported .zip
+    if not f or not f.filename.lower().endswith((".pdf", ".zip")):
+        return jsonify(error="Please upload a PDF, or an HTML deck export as its .zip."), 400
     job_id = uuid.uuid4().hex
     job_dir = WORK_DIR / job_id
     job_dir.mkdir()
