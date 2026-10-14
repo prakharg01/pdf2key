@@ -1,10 +1,8 @@
 # pdf2key
 
-Turn any PDF into an **editable** Apple Keynote presentation.
+Turn any PDF into an Apple Keynote presentation that looks the same and has **editable text**.
 
-You get real Keynote text boxes and pictures, not a deck of page screenshots. You can retype a heading, move a photo, or restyle a paragraph, and the layout stays the same as the PDF.
-
-After converting, pdf2key exports every slide back out of Keynote, compares it pixel by pixel with the PDF page, and shows you how close it is.
+Every heading, paragraph and label becomes a real Keynote text box that you can retype or restyle. Photos, shapes, gradients and logos look exactly as they do in the PDF. After converting, pdf2key exports every slide back out of Keynote, compares it pixel by pixel with the PDF page, and shows you how close it is.
 
 ## Requirements
 
@@ -14,7 +12,7 @@ After converting, pdf2key exports every slide back out of Keynote, compares it p
 ## Install
 
 ```bash
-git clone https://github.com/<you>/pdf2key.git
+git clone https://github.com/prakharg01/pdf2key.git
 cd pdf2key
 python3 -m venv .venv
 .venv/bin/pip install -e .
@@ -40,7 +38,7 @@ This opens <http://127.0.0.1:5001>. Drop in a PDF and download the `.key`. For e
 
 | Option | What it does |
 | --- | --- |
-| `--no-background` | Leave out the flattened line-art layer |
+| `--separate-images` | Make each picture its own movable object (less faithful, see below) |
 | `--no-verify` | Skip the PDF-vs-Keynote comparison (faster) |
 | `--pptx-only` | Write a `.pptx` instead of a `.key` |
 
@@ -60,22 +58,33 @@ for r in reports:
 PDF ──PyMuPDF──▶ .pptx (python-pptx) ──Keynote via AppleScript──▶ .key ──▶ accuracy check
 ```
 
-Each PDF page becomes one slide, built in layers from the bottom up:
+Each PDF page becomes one slide with two layers:
 
 | Layer | Editable? | Details |
 | --- | --- | --- |
-| Background | ✅ | A full-page fill becomes the slide background colour |
-| Pictures | ✅ | Embedded images, at original quality, with transparency kept |
-| Line art | ❌ | Vector lines, shapes and gradients, flattened into one 300 dpi transparent image |
-| Text | ✅ | Real text boxes with the PDF's line breaks, line spacing, size, colour, bold/italic and rotation |
+| Art | Picture | Everything except text, rendered at 4K exactly as the PDF draws it. Overlapping, cropped, masked and semi-transparent images and shapes all stay correct. |
+| Text | ✅ | Real text boxes. They keep the PDF's line breaks and size, colour and opacity. Baselines, letter-spacing, weight, italics and rotation are also matched (see below). |
+
+How the text is rebuilt:
+
+- **Baselines.** With exact line spacing *L*, Keynote puts each line's baseline 0.8 × *L* below the top of the line, whatever the font. pdf2key works out each line's spacing so every baseline lands exactly where the PDF has it.
+- **Words and letter-spacing.** Words and letter-spacing are rebuilt from where each glyph sits. This matters for PDFs from browsers (Chrome, "Save as PDF"), which often draw spaced-out labels with no space characters at all.
+- **Fonts with no name.** Browser PDFs often embed fonts with no name (Type3). pdf2key works out their style from the glyphs themselves:
+  - **Weight:** each font's ink is compared with the document's body font to sort it into *regular*, *medium* or *bold*.
+  - **Italics:** a deslant test finds the shear angle that makes the vertical strokes sharpest.
+  - **Monospace:** a font counts as monospace if all its glyphs have the same advance.
+- **Unrelated text.** Text that only happens to share a PDF line (such as a figure and its caption) is split into separate boxes.
 
 Pages that are a different size from the first page are scaled to fit the slide.
 
+### `--separate-images`
+
+This mode places each embedded image as its own picture, on top of a background colour and under a transparent line-art overlay, so you can drag photos around. It can't reproduce PDF stacking, clipping or opacity, so use it only for simple documents.
+
 ## Getting the closest match
 
-- **Install the PDF's fonts.** Fonts embedded in a PDF are usually partial subsets that Keynote can't use. If a font isn't installed on your Mac, pdf2key picks a mono, serif or sans lookalike and scales it so line widths still match. The app lists which fonts it substituted. Install those fonts and convert again for a near-exact result.
+- **Install the PDF's fonts.** Fonts embedded in a PDF are usually partial subsets that Keynote can't use. If a font isn't installed on your Mac, pdf2key picks a lookalike (Helvetica Neue, Menlo or Times New Roman) and scales it so line widths still match. The app lists which fonts it substituted.
 - **Scanned PDFs** contain only images, with no text to extract. Run OCR first (for example `ocrmypdf`).
-- **Vector graphics** such as charts, icons and diagram lines come through as one flattened image, so they look right but you can't edit them shape by shape.
 
 ## Development
 
@@ -84,7 +93,7 @@ Pages that are a different size from the first page are scaled to fit the slide.
 .venv/bin/pytest
 ```
 
-The tests cover the PDF → `.pptx` stage and don't need Keynote.
+The tests cover the PDF → `.pptx` stage and don't need Keynote. Put real PDFs to try in `tests/pdfs/`. PDFs and generated `.key`/`.pptx` files are git-ignored, so documents never get committed.
 
 ```
 src/pdf2key/
@@ -93,4 +102,6 @@ src/pdf2key/
   web.py         `pdf2key-web` Flask app
   static/        web UI
 tests/
+  test_converter.py
+  pdfs/          local sample PDFs (ignored by git)
 ```
