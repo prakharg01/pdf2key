@@ -674,12 +674,20 @@ def pptx_to_keynote(pptx_path, key_path, png_dir=None):
         end tell
     end run
     """
-    _wait_for_keynote()
-    args = ["osascript", "-e", script, str(pptx_path), str(key_path)]
+    # Keynote resolves relative paths against its own working directory (/),
+    # and crashes when it can't write there, so always pass absolute paths.
+    args = ["osascript", "-e", script, str(Path(pptx_path).resolve()), str(Path(key_path).resolve())]
     if png_dir:
-        args.append(str(png_dir))
-    r = subprocess.run(args, capture_output=True, text=True, timeout=900)
-    if r.returncode:
+        args.append(str(Path(png_dir).resolve()))
+    for attempt in range(2):
+        _wait_for_keynote()
+        r = subprocess.run(args, capture_output=True, text=True, timeout=900)
+        if not r.returncode:
+            return
+        # -600/-609: Keynote quit or restarted under us; relaunch and retry once
+        if attempt == 0 and re.search(r"\((-600|-609)\)", r.stderr):
+            time.sleep(3)
+            continue
         raise RuntimeError(f"Keynote conversion failed: {r.stderr.strip()}")
 
 
@@ -746,7 +754,7 @@ def missing_fonts(pdf_path):
 # --------------------------------------------------------------------------- #
 def convert(pdf_path, key_path, separate_images=False, verify=True, progress=None, preview_dir=None):
     """PDF -> .key. Returns a list of SlideReport (empty if verify is off)."""
-    pdf_path, key_path = Path(pdf_path), Path(key_path)
+    pdf_path, key_path = Path(pdf_path).resolve(), Path(key_path).resolve()
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         pptx = tmp / "deck.pptx"
