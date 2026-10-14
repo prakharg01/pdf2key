@@ -32,6 +32,13 @@ button.ghost{background:none;border:1px solid var(--line);color:var(--ink);borde
 .trio figure{margin:0}.trio img{width:100%;border-radius:6px;display:block;border:1px solid var(--line)}
 .trio figcaption{font-size:12px;color:var(--mute);text-align:center;margin-top:3px}
 @media(max-width:640px){.trio{grid-template-columns:1fr}}
+#art{display:block;width:100%;height:260px;margin:-4px 0 6px}
+#report h2{font-size:17px;margin:0 0 10px}
+#report h3{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:16px 0 6px}
+#report ul{margin:0;padding-left:18px}#report li{margin:2px 0}
+#report .n{color:var(--mute);font-variant-numeric:tabular-nums}
+#report .stats{display:flex;flex-wrap:wrap;gap:8px 22px}#report .stats b{font-size:20px;display:block}
+#quip{min-height:1.5em;margin:0 0 12px;color:var(--mute);font-size:14px;text-align:center;transition:opacity .4s}
 </style></head><body><main>
 <h1>PDF to Keynote</h1>
 <p class="sub">Upload a PDF and get an editable Keynote file: real text boxes, original-quality pictures, matching layout.</p>
@@ -41,6 +48,8 @@ button.ghost{background:none;border:1px solid var(--line);color:var(--ink);borde
 <label class="opt"><input id="bg" type="checkbox"> Make pictures individually movable (less faithful when the PDF crops or layers images)</label>
 
 <div id="work" class="card hide" style="margin-top:22px">
+  <canvas id="art" aria-hidden="true"></canvas>
+  <p id="quip" aria-live="polite"></p>
   <div id="msg">Starting…</div><div class="bar"><i id="fill"></i></div>
   <div id="err" class="err hide"></div>
 </div>
@@ -51,6 +60,7 @@ button.ghost{background:none;border:1px solid var(--line);color:var(--ink);borde
     <div id="fonts" class="note hide"></div>
     <p id="found" class="hide" style="margin:12px 0 0;color:var(--mute);font-size:14px"></p>
   </div>
+  <div id="report" class="card hide" style="margin-top:14px"></div>
   <div id="slides" class="slides"></div>
 </div>
 </main>
@@ -63,35 +73,169 @@ file.onchange=()=>file.files[0]&&start(file.files[0]);
 drop.addEventListener('drop',ev=>{const f=ev.dataTransfer.files[0];f&&start(f)});
 $('again').onclick=()=>{$('result').classList.add('hide');$('work').classList.add('hide');drop.classList.remove('hide');$('bg').parentElement.classList.remove('hide');file.value=''};
 
+/* ---- loading artwork: a page comes apart and reassembles as a slide ---- */
+const art=(()=>{
+  const cv=$('art'),cx=cv.getContext('2d'),still=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const GLYPHS='AaBbGgKkQqRr&@§¶0123456789fiﬂ—“”',CYCLE=5200;
+  let raf=0,t0=0,layout=null,cycle=-1,deck=0,W=0,H=0;
+  const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const ease=x=>x<.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2, clamp=x=>Math.max(0,Math.min(1,x));
+  function size(){const r=cv.getBoundingClientRect(),d=devicePixelRatio||1;W=r.width;H=r.height;
+    cv.width=W*d;cv.height=H*d;cx.setTransform(d,0,0,d,0,0)}
+  function boxes(){ // the source page (left) and the slide (right)
+    const ph=H*.78,pw=ph*.72,sw=Math.min(W*.42,ph*1.6),sh=sw*9/16;
+    return {page:{x:W*.08,y:(H-ph)/2,w:pw,h:ph},slide:{x:W*.92-sw,y:(H-sh)/2,w:sw,h:sh}}}
+  function newLayout(){ // random text lines + photo tiles, same on page and slide
+    const rnd=Math.random,lines=[],tiles=[],n=3+Math.floor(rnd()*3);
+    let y=.16;lines.push({y:.1,w:.55+rnd()*.3,big:1});
+    for(let i=0;i<n;i++){y+=.1+rnd()*.03;lines.push({y,w:.35+rnd()*.5})}
+    const k=1+Math.floor(rnd()*2);for(let i=0;i<k;i++)tiles.push({x:.08+i*.45,y:.62,w:.38,h:.26,hue:rnd()*360});
+    const parts=[];
+    lines.forEach((l,li)=>{const cnt=Math.round(l.w*(l.big?11:16));for(let i=0;i<cnt;i++)
+      parts.push({li,i,cnt,ch:GLYPHS[Math.floor(rnd()*GLYPHS.length)],delay:rnd()*.25+li*.03,lift:.3+rnd()*.5,big:l.big})});
+    tiles.forEach((tl,ti)=>{for(let i=0;i<14;i++)parts.push({ti,i,px:1,delay:.25+rnd()*.2,lift:.2+rnd()*.6})});
+    return {lines,tiles,parts}}
+  function frame(now){
+    if(!t0)t0=now;const e=now-t0,c=Math.floor(e/CYCLE),t=still?.82:(e%CYCLE)/CYCLE;
+    if(c!==cycle){if(cycle>=0)deck=Math.min(deck+1,9);cycle=c;layout=newLayout()}
+    const ink=css('--ink'),mute=css('--mute'),line=css('--line'),acc=css('--accent'),card=css('--card');
+    const {page,slide}=boxes();cx.clearRect(0,0,W,H);
+    // finished slides piling up in the corner
+    for(let i=0;i<deck;i++){cx.fillStyle=card;cx.strokeStyle=line;const ox=W-38+i*2,oy=H-26-i*3;
+      cx.fillRect(ox-30,oy-17,30,17);cx.strokeRect(ox-30,oy-17,30,17)}
+    // the page fades and breaks up as its contents leave
+    const fade=1-clamp((t-.15)/.5);cx.globalAlpha=.25+.75*fade;cx.strokeStyle=mute;cx.lineWidth=1.2;
+    cx.strokeRect(page.x,page.y,page.w,page.h);
+    layout.lines.forEach(l=>{cx.fillStyle=mute;cx.globalAlpha=.35*fade;
+      cx.fillRect(page.x+page.w*.1,page.y+page.h*l.y,page.w*.8*l.w,l.big?6:3)});
+    layout.tiles.forEach(tl=>{cx.fillStyle=mute;cx.globalAlpha=.25*fade;
+      cx.fillRect(page.x+page.w*.1,page.y+page.h*(.6+tl.x*.3),page.w*.8,page.h*.12)});
+    // the slide frame draws itself in
+    const sIn=ease(clamp(t/.2)),sOut=ease(clamp((t-.88)/.12));
+    cx.globalAlpha=1-sOut;cx.save();
+    const sx=slide.x+sOut*(W-60-slide.x),sy=slide.y+sOut*(H-40-slide.y),k=1-sOut*.85;
+    cx.translate(sx,sy);cx.scale(k,k);
+    cx.fillStyle=card;cx.strokeStyle=acc;cx.lineWidth=1.5;cx.shadowColor='rgba(0,0,0,.18)';cx.shadowBlur=18*sIn;
+    cx.fillRect(0,0,slide.w*sIn,slide.h);cx.shadowBlur=0;cx.strokeRect(0,0,slide.w*sIn,slide.h);
+    // photo tiles develop like a print
+    layout.tiles.forEach(tl=>{const d=clamp((t-.55)/.25);if(!d)return;
+      const g=cx.createLinearGradient(0,0,slide.w,slide.h);
+      g.addColorStop(0,`hsla(${tl.hue},70%,60%,${.9*d})`);g.addColorStop(1,`hsla(${(tl.hue+60)%360},70%,45%,${.9*d})`);
+      cx.fillStyle=g;cx.fillRect(slide.w*tl.x,slide.h*tl.y,slide.w*tl.w,slide.h*tl.h)});
+    // text lines grow on the slide as their letters land
+    const landed=layout.lines.map(()=>0);
+    layout.parts.forEach(p=>{if(!p.px&&(still||t-.15-p.delay>=.42))landed[p.li]++});
+    layout.lines.forEach((l,li)=>{const cnt=layout.parts.filter(p=>p.li===li&&!p.px).length;
+      const f=cnt?landed[li]/cnt:0;if(!f)return;cx.fillStyle=l.big?ink:mute;cx.globalAlpha=.85;
+      const r=l.big?5:3;cx.beginPath();
+      cx.roundRect(slide.w*.07,slide.h*(.1+l.y*.58)-(l.big?9:5),slide.w*.75*l.w*f,l.big?10:5,r);cx.fill()});
+    cx.restore();cx.globalAlpha=1;
+    // glyphs and pixels in flight: page -> arc -> slide
+    cx.textBaseline='alphabetic';
+    layout.parts.forEach(p=>{
+      const u=ease(clamp((t-.15-p.delay)/.42));if(still||u<=0||u>=1)return;  // only while in flight
+      let a,b,size;
+      if(p.px){const tl=layout.tiles[p.ti];
+        a={x:page.x+page.w*(.1+.8*(p.i%7)/7),y:page.y+page.h*(.6+tl.x*.3)+(p.i>6?page.h*.06:0)};
+        b={x:sx+k*slide.w*(tl.x+tl.w*(p.i%7)/7),y:sy+k*slide.h*(tl.y+(p.i>6?tl.h*.5:0))};size=5}
+      else{const l=layout.lines[p.li];
+        a={x:page.x+page.w*(.1+.8*l.w*p.i/p.cnt),y:page.y+page.h*l.y+4};
+        b={x:sx+k*slide.w*(.07+.75*l.w*p.i/p.cnt),y:sy+k*slide.h*(.1+l.y*.58)};size=(p.big?15:10)*(1-.4*u+.4)}
+      const mx=(a.x+b.x)/2,my=Math.min(a.y,b.y)-H*p.lift,v=1-u;
+      const x=v*v*a.x+2*v*u*mx+u*u*b.x,y=v*v*a.y+2*v*u*my+u*u*b.y;
+      const flying=u>0&&u<1;cx.globalAlpha=(1-sOut)*(u>=1?1:.95);
+      cx.fillStyle=flying?acc:(u>=1?ink:mute);
+      if(p.px){cx.fillRect(x,y,size,size)}
+      else{cx.font=`${p.big?700:500} ${size}px -apple-system,BlinkMacSystemFont,sans-serif`;cx.fillText(p.ch,x,y)}});
+    cx.globalAlpha=1;
+    if(!still)raf=requestAnimationFrame(frame)}
+  return {start(){size();deck=0;cycle=-1;t0=0;cancelAnimationFrame(raf);raf=requestAnimationFrame(frame);
+            addEventListener('resize',size)},
+          stop(){cancelAnimationFrame(raf);removeEventListener('resize',size)}}
+})();
+
+/* ---- what's happening, told a little more interestingly ---- */
+const QUIPS={
+  read:['Rebuilding words from where each letter sits…','Measuring letter widths to name fonts the PDF left anonymous…',
+        'Checking every installed font, one glyph at a time…','Finding the baseline of every line, to the point…'],
+  layout:['Asking Chrome to lay out each slide…','Sorting photos from paint, one element at a time…',
+          'Peeling overlays off photos, keeping their stacking order…','Cropping photos exactly like the browser does…'],
+  build:['Placing text boxes where the ink was…','Stacking layers: background, photos, overlays, text…',
+         'Letter-spacing labels the way the designer did…'],
+  keynote:['Handing the deck to Keynote…','Keynote is unpacking every slide…','Saving a real .key file…'],
+  compare:['Comparing every slide with the original, pixel by pixel…','Drawing the difference heatmaps…']};
+let quipTimer=0,quipStage='',quipIdx=0;
+function stageOf(m){m=(m||'').toLowerCase();
+  return m.includes('compar')?'compare':m.includes('keynote')?'keynote':m.includes('laying')?'layout'
+        :m.includes('building')?'build':'read'}
+function setQuip(stage){
+  if(stage===quipStage)return;quipStage=stage;quipIdx=0;showQuip();
+  clearInterval(quipTimer);quipTimer=setInterval(showQuip,3800)}
+function showQuip(){const list=QUIPS[quipStage]||QUIPS.read,q=$('quip');q.style.opacity=0;
+  setTimeout(()=>{q.textContent=list[quipIdx++%list.length];q.style.opacity=1},350)}
+function stopQuips(){clearInterval(quipTimer);quipStage=''}
+
+function esc(t){return String(t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function renderReport(r){
+  const el=$('report');if(!r){el.classList.add('hide');return}
+  const n=x=>Number(x).toLocaleString(), list=(items,fmt)=>'<ul>'+items.map(fmt).join('')+'</ul>';
+  let h='<h2>Conversion report</h2><div class="stats">'+
+    `<span><b>${r.slides}</b>slides</span><span><b>${Math.round(r.seconds)} s</b>time</span>`+
+    (r.accuracy?`<span><b>${r.accuracy.average.toFixed(1)}%</b>match with the original</span>`:'')+
+    Object.entries(r.objects||{}).map(([k,v])=>`<span><b>${n(v)}</b>${esc(k)}</span>`).join('')+'</div>';
+  if(r.accuracy&&r.accuracy.worst.length)h+='<h3>Lowest-matching slides</h3>'+
+    list(r.accuracy.worst,([p,m])=>`<li>Slide ${p}: ${m.toFixed(1)}%</li>`);
+  const f=r.fonts;
+  if(f.recognised.length)h+='<h3>Fonts recognised from the glyphs</h3><p class="n" style="margin:0 0 4px">The original had no names for these; each was matched to an installed font by its letter widths.</p>'+
+    list(f.recognised,([a,c])=>`<li>${esc(a)} <span class="n">· ${n(c)} characters</span></li>`);
+  if(f.installed.length)h+='<h3>Fonts used as named</h3>'+list(f.installed,([a,c])=>`<li>${esc(a)} <span class="n">· ${n(c)} characters</span></li>`);
+  if(f.substituted.length)h+='<h3>Fonts substituted (not installed)</h3>'+
+    list(f.substituted,([a,b,c])=>`<li>${esc(a)} → ${esc(b)} <span class="n">· ${n(c)} characters</span></li>`);
+  if(f.estimated.length)h+='<h3>Unnamed fonts with no installed match (style estimated)</h3>'+
+    list(f.estimated,([a,c])=>`<li>${esc(a)} <span class="n">· ${n(c)} characters</span></li>`);
+  const t=r.text,ch=[];
+  if(t.scales.length){const lo=Math.min(...t.scales),hi=Math.max(...t.scales);
+    ch.push(`${n(t.scales.length)} text boxes resized ${((lo-1)*100).toFixed(0)}% to ${((hi-1)*100).toFixed(0)}% so substituted fonts keep the original line widths`)}
+  if(t.letter_spaced)ch.push(`${n(t.letter_spaced)} runs given the original letter-spacing`);
+  if(t.justified_lines)ch.push(`${n(t.justified_lines)} justified lines kept justified by widening their spaces`);
+  if(t.rotated)ch.push(`${n(t.rotated)} rotated text boxes`);
+  if(ch.length)h+=`<h3>Text adjustments · ${n(t.boxes)} text boxes</h3>`+list(ch,c=>`<li>${c}</li>`);
+  if(r.warnings.length)h+='<h3>Warnings</h3>'+list(r.warnings,w=>`<li>${esc(w)}</li>`);
+  el.innerHTML=h;el.classList.remove('hide')}
+
 async function start(f){
   if(!/\.(pdf|zip)$/i.test(f.name)){alert('Please choose a PDF, or an HTML deck export as its .zip.');return}
   drop.classList.add('hide');$('bg').parentElement.classList.add('hide');
   $('work').classList.remove('hide');$('result').classList.add('hide');
   $('err').classList.add('hide');$('msg').textContent='Uploading…';$('fill').style.width='2%';
+  art.start();setQuip('read');
   const fd=new FormData();fd.append('pdf',f);fd.append('separate_images',$('bg').checked?'1':'0');
   const r=await fetch('/convert',{method:'POST',body:fd});const j=await r.json();
   if(!r.ok){fail(j.error);return}
   poll(j.id);
 }
-function fail(m){$('err').textContent=m||'Conversion failed';$('err').classList.remove('hide');$('msg').textContent='Something went wrong';
+function fail(m){art.stop();stopQuips();$('quip').textContent='';$('err').textContent=m||'Conversion failed';$('err').classList.remove('hide');$('msg').textContent='Something went wrong';
   drop.classList.remove('hide');$('bg').parentElement.classList.remove('hide')}
 async function poll(id){
   const s=await (await fetch('/status/'+id)).json();
   $('msg').textContent=s.message||'Working…';$('fill').style.width=Math.max(2,(s.progress||0)*100)+'%';
+  setQuip(stageOf(s.message));
   if(s.state==='error')return fail(s.error);
   if(s.state==='done')return show(id,s);
   setTimeout(()=>poll(id),700);
 }
 function show(id,s){
+  art.stop();stopQuips();
   $('work').classList.add('hide');$('result').classList.remove('hide');
   $('dl').href='/download/'+id;
   const r=s.reports||[];
   if(r.length){const avg=r.reduce((a,x)=>a+x.match,0)/r.length;
-    $('summary').innerHTML='<b>'+r.length+' slide'+(r.length>1?'s':'')+'</b> converted. Average pixel match with the PDF: <b>'+avg.toFixed(1)+'%</b>.'}
+    $('summary').innerHTML='<b>'+r.length+' slide'+(r.length>1?'s':'')+'</b> converted. Average pixel match with the original: <b>'+avg.toFixed(1)+'%</b>.'}
   if(s.missing_fonts&&s.missing_fonts.length){const f=$('fonts');f.classList.remove('hide');
     f.textContent='Fonts not installed on this Mac, so similar ones were substituted: '+s.missing_fonts.join(', ')+
     '. Install them and convert again for a closer match.'}else $('fonts').classList.add('hide');
-  const found=s.identified_fonts||[];
+  renderReport(s.report);
+  const found=[];
   if(found.length){$('found').textContent='Fonts recognised from the PDF\'s glyphs: '+found.join(', ')+'.';$('found').classList.remove('hide')}
   else $('found').classList.add('hide');
   $('slides').innerHTML=r.map(x=>`<div class="slide"><h3><span>Slide ${x.page}</span><em>${x.match.toFixed(1)}% match · ${x.off_pixels.toFixed(1)}% pixels differ</em></h3>
