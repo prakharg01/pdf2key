@@ -155,7 +155,7 @@ def _scale_for(lines):
             if exact or measure is None:
                 return 1.0
             have += pymupdf.Font(measure).text_length(s["text"], s["size"])
-            have += s["tracking"] * max(len(s["text"]) - 1, 0)
+            have += s["tracking"] * max(len(s["text"]) - 1, 0) + s["word_extra"] * s["text"].count(" ")
         if have > 0 and want > 0:
             ratios.append(want / have)
     if not ratios:
@@ -169,8 +169,9 @@ def _scale_for(lines):
 def _rebuild(chars, size, direction):
     """Join glyphs into text, inserting spaces at word gaps.
 
-    Returns (text, tracking, mono). Tracking is the extra space between
-    letters (CSS letter-spacing); mono means every glyph has the same advance.
+    Returns (text, tracking, word_extra, mono). Tracking is the extra space
+    between letters (CSS letter-spacing); word_extra is the extra width each
+    real space gets (justified text); mono means every glyph has the same advance.
     """
     dx, dy = direction
     pos = [c["origin"][0] * dx + c["origin"][1] * dy for c in chars]
@@ -194,9 +195,13 @@ def _rebuild(chars, size, direction):
             out.append(" ")
         out.append(chars[i + 1]["c"])
 
+    space_gaps = [gaps[i] - tracking for i in range(len(gaps)) if chars[i]["c"] == " "]
+    word_extra = statistics.median(space_gaps) if space_gaps else 0
+    word_extra = word_extra if 0.01 * size < word_extra < 2 * size else 0
+
     widths = [a for a, c in zip(adv, chars) if c["c"].strip()]
     mono = len(widths) >= 4 and max(widths) - min(widths) < 0.03 * size
-    return "".join(out), tracking, mono
+    return "".join(out), tracking, word_extra, mono
 
 
 def _merge_spans(spans, hidden):
@@ -259,7 +264,7 @@ def _extract_blocks(page):
             dx, dy = l["dir"]
             for s in _merge_spans(l["spans"], hidden):
                 chars = s["chars"]
-                text, tracking, mono = _rebuild(chars, s["size"], l["dir"])
+                text, tracking, word_extra, mono = _rebuild(chars, s["size"], l["dir"])
                 start = chars[0]["origin"][0] * dx + chars[0]["origin"][1] * dy
                 if prev_end is not None and spans and not text.startswith(" ") \
                         and not spans[-1]["text"].endswith(" ") and start - prev_end > 0.22 * s["size"]:
@@ -268,7 +273,7 @@ def _extract_blocks(page):
                 prev_end = last["origin"][0] * dx + last["origin"][1] * dy + \
                     (last["bbox"][2] - last["bbox"][0]) * abs(dx) + (last["bbox"][3] - last["bbox"][1]) * abs(dy)
                 spans.append(dict(text=text, size=s["size"], font=s["font"], flags=s["flags"],
-                                  color=s["color"], alpha=s.get("alpha", 255), tracking=tracking,
+                                  color=s["color"], alpha=s.get("alpha", 255), tracking=tracking, word_extra=word_extra,
                                   mono=mono, weight=None, slanted=False, origin=s["origin"], bbox=s["bbox"], chars=chars))
             for seg in _split_segments(spans, l["dir"]):
                 if "".join(sp["text"] for sp in seg).strip():
@@ -589,18 +594,32 @@ def _add_text_box(slide, lines, fit):
         for span in line["spans"]:
             if not span["text"]:
                 continue
-            family, bold, italic, _, exact = _span_font(span)
-            k = (1 if exact else scale) * fit.s
-            run = para.add_run()
-            run.text = span["text"]
-            font = run.font
-            font.size = Pt(max(span["size"] * k, 1))
-            font.name = family
-            font.bold = bold
-            font.italic = italic
-            if span["tracking"]:
-                run._r.get_or_add_rPr().set("spc", str(round(span["tracking"] * fit.s * 100)))
-            _set_color(font, span["color"], span["alpha"])
+            _add_runs(para, span, scale, fit)
+
+
+def _add_runs(para, span, scale, fit):
+    """One run per span; justified lines get their spaces as separate runs
+    widened by the PDF's extra word spacing, since Keynote won't justify
+    lines that don't wrap."""
+    family, bold, italic, _, exact = _span_font(span)
+    k = (1 if exact else scale) * fit.s
+    pieces = re.split(r"( +)", span["text"]) if span["word_extra"] else [span["text"]]
+    for piece in pieces:
+        if not piece:
+            continue
+        spacing = span["tracking"]
+        if piece.startswith(" ") and span["word_extra"]:
+            spacing += span["word_extra"]
+        run = para.add_run()
+        run.text = piece
+        font = run.font
+        font.size = Pt(max(span["size"] * k, 1))
+        font.name = family
+        font.bold = bold
+        font.italic = italic
+        if spacing:
+            run._r.get_or_add_rPr().set("spc", str(round(spacing * fit.s * 100)))
+        _set_color(font, span["color"], span["alpha"])
 
 
 def _add_text(slide, blocks, fit):

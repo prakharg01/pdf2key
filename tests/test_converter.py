@@ -106,14 +106,14 @@ def test_rebuild_restores_word_gaps_and_letter_spacing():
     chars = _glyphs("AB", 5, 2) + [dict(c=c["c"], origin=(c["origin"][0] + 20, 0),
                                         bbox=(c["bbox"][0] + 20, -10, c["bbox"][2] + 20, 0))
                                    for c in _glyphs("CD", 5, 2)]
-    text, tracking, mono = _rebuild(chars, 10, (1.0, 0.0))
+    text, tracking, _, mono = _rebuild(chars, 10, (1.0, 0.0))
     assert text == "AB CD"
     assert tracking == pytest.approx(2)
     assert mono
 
 
 def test_rebuild_ignores_negative_spacing():
-    text, tracking, _ = _rebuild(_glyphs("Hello", 5, -1), 10, (1.0, 0.0))
+    text, tracking, _, _ = _rebuild(_glyphs("Hello", 5, -1), 10, (1.0, 0.0))
     assert text == "Hello" and tracking == 0
 
 
@@ -124,3 +124,12 @@ def test_text_baseline_matches_pdf(sample_pdf, tmp_path):
     box = next(s for s in Presentation(out).slides[0].shapes if s.has_text_frame and s.text_frame.text == "Title")
     line = box.text_frame.paragraphs[0].line_spacing.pt
     assert (box.top / 12700) + BASELINE_IN_LINE * line == pytest.approx(80, abs=0.5)
+
+
+def test_rebuild_measures_justified_word_spacing():
+    # "ab cd" with a real space glyph followed by 3pt of extra (justified) space
+    chars = _glyphs("ab ", 5, 0)
+    chars += [dict(c=c["c"], origin=(c["origin"][0] + 18, 0), bbox=(c["bbox"][0] + 18, -10, c["bbox"][2] + 18, 0))
+              for c in _glyphs("cd", 5, 0)]
+    text, tracking, word_extra, _ = _rebuild(chars, 10, (1.0, 0.0))
+    assert text == "ab cd" and tracking == 0 and word_extra == pytest.approx(3)
