@@ -85,3 +85,31 @@ def test_find_html_accepts_zip_folder_or_file(tmp_path):
     assert _find_html(z, tmp_path / "w3").name == "My Deck.html"                  # zip
     with pytest.raises(ValueError):
         _find_html(tmp_path / "deck.txt", tmp_path / "w4")
+
+
+def test_list_decks_ranks_the_real_deck_first(tmp_path):
+    from pdf2key.html import list_decks
+    for name, n in [("Deck.html", 30), ("Deck v3.html", 50), ("Deck v3 - backup.html", 55),
+                    ("Deck v3-print.html", 50), ("ref/Other.html", 60), ("notes.html", 0)]:
+        f = tmp_path / name
+        f.parent.mkdir(exist_ok=True)
+        f.write_text("<section></section>" * n)
+    names = [d for d, _ in list_decks(tmp_path)]
+    assert names[:2] == ["Deck v3.html", "Deck.html"]
+    assert "notes.html" not in names and names.index("ref/Other.html") > 1
+
+
+def test_avif_behind_a_png_name_is_converted(tmp_path):
+    from io import BytesIO
+    from PIL import features
+    from pdf2key.html import _keynote_ready
+    if not features.check("avif"):
+        pytest.skip("Pillow built without AVIF")
+    buf = BytesIO()
+    Image.new("RGB", (40, 30), (10, 200, 30)).save(buf, "AVIF")
+    data = buf.getvalue()
+    out = _keynote_ready(Image.open(BytesIO(data)), data)
+    assert Image.open(BytesIO(out)).format in ("JPEG", "PNG")
+    png = BytesIO()
+    Image.new("RGB", (4, 4)).save(png, "PNG")
+    assert _keynote_ready(Image.open(BytesIO(png.getvalue())), png.getvalue()) == png.getvalue()

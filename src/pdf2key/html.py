@@ -143,23 +143,79 @@ HIDE_TEXT_CSS = """
 """
 
 
-def _find_html(path, workdir):
-    """The deck's HTML file, from a .zip export, an unzipped export folder, or
-    the .html itself. Its assets (images, styles, fonts) must sit beside it."""
+NOT_THE_DECK = re.compile(r"print|backup|parked|export|copy|old|draft|thumbnail|\bref\b", re.I)
+
+
+def _slide_count(html_file):
+    try:
+        return len(re.findall(r"<section\b", html_file.read_text(encoding="utf-8", errors="ignore")))
+    except OSError:
+        return 0
+
+
+def _version(name):
+    m = re.search(r"\bv(\d+)\b", name, re.I)
+    return int(m.group(1)) if m else 0
+
+
+def list_decks(path):
+    """HTML decks in an export folder, most likely first, as (relative path,
+    slide count). Exports often hold old versions, print copies and reference
+    pages beside the deck; those rank last."""
+    root = Path(path)
+    found = []
+    for f in root.rglob("*.htm*"):
+        rel = f.relative_to(root)
+        if f.name.startswith(".") or f.suffix.lower() not in (".html", ".htm"):
+            continue
+        n = _slide_count(f)
+        if n:
+            found.append((rel, n))
+    def rank(item):
+        rel, n = item
+        sidelined = bool(NOT_THE_DECK.search(str(rel))) or len(rel.parts) > min(len(r.parts) for r, _ in found)
+        return (sidelined, -_version(rel.stem), -n, str(rel))
+    return [(str(r), n) for r, n in sorted(found, key=rank)]
+
+
+def _unpack(path, workdir):
+    with zipfile.ZipFile(path) as z:
+        for name in z.namelist():  # no absolute paths or ".." escapes
+            if name.startswith("/") or ".." in Path(name).parts:
+                raise ValueError(f"unsafe path in zip: {name}")
+        z.extractall(workdir)
+    return Path(workdir)
+
+
+def decks_in(path):
+    """Decks inside a .zip export or folder (no files are left behind)."""
     path = Path(path)
     if path.suffix.lower() == ".zip":
-        with zipfile.ZipFile(path) as z:
-            for name in z.namelist():  # no absolute paths or ".." escapes
-                if name.startswith("/") or ".." in Path(name).parts:
-                    raise ValueError(f"unsafe path in zip: {name}")
-            z.extractall(workdir)
-        path = Path(workdir)
+        with tempfile.TemporaryDirectory() as tmp:
+            return list_decks(_unpack(path, tmp))
     if path.is_dir():
-        candidates = [p for p in path.rglob("*.html") if not p.name.startswith(".")]
-        if not candidates:
-            raise ValueError(f"no .html file in {path.name}")
-        path = max(candidates, key=lambda p: p.stat().st_size)  # the deck, not helper pages
-    elif path.suffix.lower() not in (".html", ".htm"):
+        return list_decks(path)
+    return [(path.name, _slide_count(path))]
+
+
+def _find_html(path, workdir, deck=None):
+    """The deck's HTML file, from a .zip export, an unzipped export folder, or
+    the .html itself. Its assets (images, styles, fonts) must sit beside it.
+    `deck` picks one by (part of) its name when the export holds several."""
+    path = Path(path)
+    if path.suffix.lower() == ".zip":
+        path = _unpack(path, workdir)
+    if path.is_dir():
+        decks = list_decks(path)
+        if not decks:
+            raise ValueError(f"no HTML deck (a page with <section> slides) in {path.name}")
+        if deck:
+            chosen = [d for d, _ in decks if d == deck] or [d for d, _ in decks if deck.lower() in d.lower()]
+            if not chosen:
+                raise ValueError(f"no deck matching {deck!r}; found: " + "; ".join(d for d, _ in decks))
+            return (path / chosen[0]).resolve()
+        return (path / decks[0][0]).resolve()
+    if path.suffix.lower() not in (".html", ".htm"):
         raise ValueError("expected a .zip export, an export folder, or an .html file")
     return path.resolve()
 
@@ -271,6 +327,34 @@ def _displayed_rect(item):
     return (box["x"] + _parse_pos(px, bw - w), box["y"] + _parse_pos(py, bh - h), w, h)
 
 
+PPTX_FORMATS = {"BMP", "GIF", "JPEG", "PNG", "TIFF"}
+
+
+def _keynote_ready(img, data):
+    """Bytes of a format the .pptx can carry. AVIF, WebP, HEIC and friends
+    (often hiding behind a .png or .jpg name) are converted to PNG or JPEG."""
+    if img.format in PPTX_FORMATS:
+        return data
+    buf = BytesIO()
+    if img.mode in ("RGBA", "LA", "P", "PA") or "transparency" in img.info:
+        img.convert("RGBA").save(buf, "PNG", optimize=True)
+    else:
+        img.convert("RGB").save(buf, "JPEG", quality=92)
+    return buf.getvalue()
+
+
+def _decodable(src, base_dir):
+    """Can the original bytes be read here (else the browser's rendering is used)."""
+    data = _image_bytes(src, base_dir)
+    if not data:
+        return False
+    try:
+        Image.open(BytesIO(data)).size
+        return True
+    except Exception:
+        return False
+
+
 def _photo_name(item):
     name = Path(unquote(urlparse(item["src"]).path)).name if not item["src"].startswith("data:") else "image"
     return f"Photo · {name}"
@@ -289,7 +373,11 @@ def _add_picture(shapes, item, base_dir, layer_png=None):
     data = _image_bytes(item["src"], base_dir)
     if not data:
         return None
-    img = Image.open(BytesIO(data))
+    try:
+        img = Image.open(BytesIO(data))
+        data = _keynote_ready(img, data)
+    except Exception:
+        return None
     item.setdefault("natural", list(img.size))
     dx, dy, dw, dh = _displayed_rect(item)
     # visible part: displayed image ∩ its box ∩ ancestors' overflow clip
@@ -436,13 +524,15 @@ def _build_slide(slide, layers, base_dir, width, height, report=None):
                 nxt.remove(pc)
 
 
-def html_to_pptx(html_path, pptx_path, pdf_out, progress=None, report=None):
+def html_to_pptx(html_path, pptx_path, pdf_out, progress=None, report=None, deck=None):
     """Build the .pptx from an HTML deck (or a zip of one). Also writes the
     deck as a PDF to `pdf_out` (used for the text and the accuracy check)."""
     from playwright.sync_api import sync_playwright
 
     with tempfile.TemporaryDirectory() as tmp, sync_playwright() as pw:
-        html = _find_html(html_path, tmp)
+        html = _find_html(html_path, tmp, deck)
+        if report is not None:
+            report["deck"] = html.name
         base_dir = html.parent
         browser = pw.chromium.launch(channel="chrome")
         try:
@@ -511,7 +601,9 @@ def html_to_pptx(html_path, pptx_path, pdf_out, progress=None, report=None):
                         continue
                     if run:
                         flush()
-                    if it["complex"]:
+                    # effects Keynote can't do, or a file we can't read here (SVG, remote
+                    # URL, corrupt): use the browser's own rendering of just this picture
+                    if it["complex"] or not _decodable(it["src"], base_dir):
                         layers.append(("picture", it, _render_layer(slide_page, [it["id"]], [])))
                     else:
                         layers.append(("picture", it, None))
@@ -539,7 +631,7 @@ def html_to_pptx(html_path, pptx_path, pdf_out, progress=None, report=None):
         prs.save(pptx_path)
 
 
-def convert_html(html_path, key_path, verify=True, progress=None, preview_dir=None, report=None):
+def convert_html(html_path, key_path, verify=True, progress=None, preview_dir=None, report=None, deck=None):
     """HTML deck (or zip/folder) -> .key. Returns SlideReports like converter.convert.
     Pass a dict from report.new() as `report` to receive the status report."""
     import time
@@ -548,7 +640,7 @@ def convert_html(html_path, key_path, verify=True, progress=None, preview_dir=No
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         pptx, pdf = tmp / "deck.pptx", tmp / "deck.pdf"
-        html_to_pptx(html_path, pptx, pdf, progress, report)
+        html_to_pptx(html_path, pptx, pdf, progress, report, deck)
         if progress:
             progress("Importing into Keynote", 0.8)
         png_dir = tmp / "slides" if verify else None
