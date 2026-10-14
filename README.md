@@ -7,13 +7,21 @@ Turn a **PDF** or an **HTML deck export** (such as a Claude Design `.zip`) into 
 | A PDF | Editable text. Everything else (photos, shapes, gradients) is one picture behind the text, exactly as the PDF draws it. |
 | An HTML deck export (`.zip`, unzipped folder, or its `.html`) *(experimental)* | Editable text **and movable photos**. Each photo is its own Keynote picture, made from the original image file with its crop. Cards, overlays and backgrounds are transparent layers in between. |
 
-After converting, pdf2key exports every slide back out of Keynote, compares it pixel by pixel with the original, and shows you how close it is.
+After converting, pdf2key exports every slide back out of Keynote, compares it pixel by pixel with the original, and gives you a **conversion report**:
+
+- **Results:** slides, time taken, the average match and the lowest-matching slides.
+- **Objects created:** text boxes, photos, shapes, overlays and photo groups.
+- **Font changes:** every font recognised from glyphs, used as named, substituted or estimated, with character counts.
+- **Text adjustments:** letter-spacing, justification, rotated text, and boxes resized for substitute fonts.
+- **Warnings:** for example, images that weren't found.
+
+The web app shows the report as a card. The command line prints it at the end.
 
 ## Requirements
 
 - macOS with **Keynote** installed (Keynote does the final `.pptx` → `.key` step)
 - Python 3.10+
-- For HTML decks: **Google Chrome**, plus the `html` extra (installs Playwright, which drives your installed Chrome; no extra browser download)
+- For HTML decks: **Google Chrome**, plus the `html` extra. It installs Playwright, which drives your installed Chrome (no extra browser download), and SciPy, which splits layers into objects.
 
 ## Install
 
@@ -111,10 +119,11 @@ A PDF only records "draw this image here". The HTML knows which element is a pho
 
 1. **Layout.** Chrome lays out each slide at the deck's size with the deck's fonts.
 2. **Photos.** Every element is listed in paint order. Each `<img>` or CSS background image becomes a Keynote picture made from the **original file**. It keeps the crop the browser applies (`object-fit`, `object-position`, `background-size`, overflow clipping), along with opacity and rounded corners. Pictures with effects Keynote can't reproduce (filters, masks, rotation, blend modes) are captured on their own, still as separate pictures.
-3. **Layers.** Each run of decorations between two pictures (backgrounds, cards, gradients, borders, SVG) becomes one transparent layer cut to its content. Overlays therefore stay above the photos they cover.
-4. **Text.** Chrome also prints the slides to PDF, and the text pipeline below puts editable text on top.
+3. **Layers.** Decorations between two pictures (backgrounds, cards, gradients, borders, SVG arrows) become transparent layers in the right stacking order. Each layer is **split into its separate islands**, so every card, arrow, badge and overlay is its own object. Paint that covers the whole slide (the background, a full-slide tint) is kept as its own layer, so it never fuses the shapes above it.
+4. **Groups and names.** A photo is grouped with any overlay that lies only on it (a card's gradient, a caption plate), so they move together. Double-click the group to reach the photo and crop or replace it. Every object is named ("Photo · robot.png", "Overlay", "Shape", "Background"), so you can pick anything from Keynote's object list (**View › Show Object List**), even under a full-slide tint.
+5. **Text.** Chrome also prints the slides to PDF, and the text pipeline below puts editable text on top.
 
-On the sample 25-slide deck this gives about 200 movable pictures and a 97.6% average match. Cards, borders and gradients are still pictures, not native Keynote shapes.
+On the sample 25-slide deck this gives 123 photos, 275 shapes, 15 overlays and 7 photo groups as separate objects, with a 97.6% average match. Cards, borders and gradients are pictures, not native Keynote shapes you can recolour.
 
 ### How the text is rebuilt (both inputs)
 
@@ -152,6 +161,7 @@ src/pdf2key/
   converter.py   PDF engine, Keynote step and accuracy check
   fonts.py       installed-font catalog and glyph-width font matching
   html.py        HTML deck input (movable pictures), experimental
+  report.py      the conversion report
   cli.py         `pdf2key` command
   web.py         `pdf2key-web` Flask app
   static/        web UI
