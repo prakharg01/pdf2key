@@ -113,3 +113,24 @@ def test_avif_behind_a_png_name_is_converted(tmp_path):
     png = BytesIO()
     Image.new("RGB", (4, 4)).save(png, "PNG")
     assert _keynote_ready(Image.open(BytesIO(png.getvalue())), png.getvalue()) == png.getvalue()
+
+
+def test_svg_parts_the_deck_hides_stay_hidden(chrome, tmp_path):
+    """Build-up slides hide later stages with CSS on SVG groups."""
+    from pdf2key.html import html_to_pptx
+    (tmp_path / "deck.html").write_text("""<!doctype html><html><head><style>
+      section.v1 .s2 { visibility: hidden }</style></head><body>
+      <section class="v1" style="position:relative;width:1920px;height:1080px;background:#fff">
+        <svg style="position:absolute;left:0;top:0" width="1920" height="1080">
+          <g class="s1"><rect x="100" y="100" width="200" height="200" fill="#00f"/></g>
+          <g class="s2"><rect x="1400" y="700" width="300" height="300" fill="#f00"/></g>
+        </svg>
+      </section></body></html>""")
+    out = tmp_path / "deck.pptx"
+    html_to_pptx(tmp_path / "deck.html", out, tmp_path / "deck.pdf")
+    from io import BytesIO
+    for shape in Presentation(out).slides[0].shapes:
+        if shape.shape_type == 13:
+            img = Image.open(BytesIO(shape.image.blob)).convert("RGB")
+            red = sum(1 for r, g, b in img.getdata() if r > 200 and g < 60 and b < 60)
+            assert red == 0, f"hidden stage leaked into {shape.name}"

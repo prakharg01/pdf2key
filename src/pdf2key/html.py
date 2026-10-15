@@ -240,8 +240,9 @@ def _render_layer(page, visible, hide_bg_images):
         # :not(#p2k) adds an id's worth of specificity, so these beat the rule above
         sel = ", ".join(f'[data-p2k="{i}"]:not(#p2k)' for i in visible)
         rules.append(f"{sel} {{ visibility: visible !important; }}")
-        rules.append(", ".join(f'[data-p2k="{i}"] svg *:not(#p2k)' for i in visible)
-                     + " { visibility: visible !important; }")
+        # An <svg>'s children inherit its visibility, so they need no rule of their
+        # own; forcing them visible would undo parts the deck hides on purpose
+        # (build-up stages like `section.v1 .s2 {visibility: hidden}`).
     if hide_bg_images:
         rules.append(", ".join(f'[data-p2k="{i}"]:not(#p2k)' for i in hide_bg_images)
                      + " { background-image: none !important; }")
