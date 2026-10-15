@@ -632,24 +632,17 @@ def html_to_pptx(html_path, pptx_path, pdf_out, progress=None, report=None, deck
         prs.save(pptx_path)
 
 
-def convert_html(html_path, key_path, verify=True, progress=None, preview_dir=None, report=None, deck=None):
-    """HTML deck (or zip/folder) -> .key. Returns SlideReports like converter.convert.
+def convert_html(html_path, key_path, verify=True, progress=None, preview_dir=None, report=None, deck=None,
+                 pptx_out=None, keynote=True):
+    """HTML deck (or zip/folder) -> .key and/or .pptx, like converter.convert.
     Pass a dict from report.new() as `report` to receive the status report."""
     import time
     started = time.time()
-    key_path = Path(key_path).resolve()
+    key_path = Path(key_path).resolve() if key_path else None
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         pptx, pdf = tmp / "deck.pptx", tmp / "deck.pdf"
         html_to_pptx(html_path, pptx, pdf, progress, report, deck)
-        if progress:
-            progress("Importing into Keynote", 0.8)
-        png_dir = tmp / "slides" if verify else None
-        converter.pptx_to_keynote(pptx, key_path, png_dir)
-        slides = []
-        if verify:
-            if progress:
-                progress("Comparing slides with the original", 0.95)
-            slides = converter.compare(pdf, png_dir, preview_dir or tmp / "preview")
+        slides = converter._finish(pptx, key_path, pptx_out, keynote, verify, pdf, progress, preview_dir, tmp)
         reporting.record_accuracy(report, slides, time.time() - started)
         return slides

@@ -163,3 +163,11 @@ def test_identify_prefers_user_installed_and_italic_hint():
     assert identify(samples, slanted=False, faces=faces)[0].face.keynote_name == "UserMono"
     best = identify(samples, slanted=True, faces=faces)[0].face
     assert best.family == "UserMono" and best.italic
+
+
+def test_cli_format_pptx_needs_no_keynote(sample_pdf, tmp_path, capsys):
+    from pdf2key.cli import main
+    main([str(sample_pdf), str(tmp_path / "out.key"), "--format", "pptx"])
+    assert (tmp_path / "out.pptx").exists() and not (tmp_path / "out.key").exists()
+    assert len(Presentation(tmp_path / "out.pptx").slides) == 2
+    assert "Conversion report" in capsys.readouterr().out

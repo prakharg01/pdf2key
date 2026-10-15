@@ -16,6 +16,7 @@ Afterwards every slide is exported from Keynote and compared with the PDF page.
 """
 import math
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -935,24 +936,39 @@ def missing_fonts(pdf_path):
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
+def _finish(pptx, key_path, pptx_out, keynote, verify, original_pdf, progress, preview_dir, tmp):
+    """Shared tail of both inputs: keep the .pptx, make the .key, compare."""
+    if pptx_out:
+        Path(pptx_out).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(pptx, pptx_out)
+    if not keynote:
+        return []
+    if progress:
+        progress("Importing into Keynote", 0.8)
+    png_dir = tmp / "slides" if verify else None
+    pptx_to_keynote(pptx, key_path, png_dir)
+    if not verify:
+        return []
+    if progress:
+        progress("Comparing slides with the original", 0.95)
+    return compare(original_pdf, png_dir, preview_dir or tmp / "preview")
+
+
 def convert(pdf_path, key_path, separate_images=False, verify=True, progress=None, preview_dir=None,
-            report=None):
-    """PDF -> .key. Returns a list of SlideReport (empty if verify is off).
-    Pass a dict from report.new() as `report` to receive the status report."""
+            report=None, pptx_out=None, keynote=True):
+    """PDF -> .key and/or .pptx. Returns a list of SlideReport (empty if verify
+    or keynote is off; the check needs Keynote to render the slides).
+
+    pptx_out: also save the PowerPoint file there. keynote=False skips Keynote
+    entirely (key_path is then ignored). Pass a dict from report.new() as
+    `report` to receive the status report."""
     started = time.time()
-    pdf_path, key_path = Path(pdf_path).resolve(), Path(key_path).resolve()
+    pdf_path = Path(pdf_path).resolve()
+    key_path = Path(key_path).resolve() if key_path else None
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         pptx = tmp / "deck.pptx"
         pdf_to_pptx(pdf_path, pptx, separate_images, progress, report)
-        if progress:
-            progress("Importing into Keynote", 0.8)
-        png_dir = tmp / "slides" if verify else None
-        pptx_to_keynote(pptx, key_path, png_dir)
-        slides = []
-        if verify:
-            if progress:
-                progress("Comparing slides with the PDF", 0.95)
-            slides = compare(pdf_path, png_dir, preview_dir or tmp / "preview")
+        slides = _finish(pptx, key_path, pptx_out, keynote, verify, pdf_path, progress, preview_dir, tmp)
         reporting.record_accuracy(report, slides, time.time() - started)
         return slides
