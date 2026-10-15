@@ -1,43 +1,68 @@
-"""Command line: pdf2key input.pdf [output.key]"""
+"""Command line: pdf2key input [output] [--format key|pptx|both]"""
 import argparse
 import sys
 from pathlib import Path
 
-from .converter import convert, missing_fonts, pdf_to_pptx
+from . import report
+from .converter import convert, missing_fonts
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="pdf2key", description="Convert a PDF into an editable Keynote presentation.")
-    ap.add_argument("pdf", help="input PDF")
-    ap.add_argument("output", nargs="?", help="output .key (default: next to the PDF)")
-    ap.add_argument("--pptx-only", action="store_true", help="write a .pptx and skip Keynote")
+    ap = argparse.ArgumentParser(prog="pdf2key", description="Convert a PDF into an editable Keynote and/or "
+                                 "PowerPoint presentation. Experimental: give an HTML deck (or a .zip of one) "
+                                 "to also get movable pictures.")
+    ap.add_argument("pdf", help="input PDF, or an HTML deck export: the .zip, the unzipped folder, "
+                                "or the .html inside it (experimental)")
+    ap.add_argument("output", nargs="?", help="output file; its extension is swapped per format "
+                                              "(default: next to the input)")
+    ap.add_argument("--format", choices=("key", "pptx", "both"), default="key",
+                    help="key (default), pptx (PowerPoint; skips Keynote, so it's fast and needs no Keynote), "
+                         "or both")
+    ap.add_argument("--pptx-only", action="store_true", help=argparse.SUPPRESS)  # old spelling of --format pptx
     ap.add_argument("--separate-images", action="store_true",
-                    help="make pictures individually movable (less faithful for cropped/masked images)")
-    ap.add_argument("--no-verify", action="store_true", help="skip the PDF-vs-Keynote comparison")
+                    help="PDFs: make pictures individually movable (less faithful for cropped/masked images)")
+    ap.add_argument("--no-verify", action="store_true", help="skip the comparison with the original")
+    ap.add_argument("--deck", help="HTML exports holding several decks: which one (part of its file name)")
+    ap.add_argument("--list-decks", action="store_true", help="list the decks in an HTML export and stop")
     args = ap.parse_args(argv)
+    fmt = "pptx" if args.pptx_only else args.format
 
-    pdf = Path(args.pdf).resolve()
-    if not pdf.exists():
-        ap.error(f"{pdf} not found")
-    out = Path(args.output).resolve() if args.output else pdf.with_suffix(".key")
+    src = Path(args.pdf).resolve()
+    if not src.exists():
+        ap.error(f"{src} not found")
+    base = Path(args.output).resolve() if args.output else (
+        src.parent / f"{src.name}.key" if src.is_dir() else src.with_suffix(".key"))
+    key_out = base.with_suffix(".key") if fmt in ("key", "both") else None
+    pptx_out = base.with_suffix(".pptx") if fmt in ("pptx", "both") else None
+    keynote = key_out is not None
     log = lambda msg, frac: print(f"  {msg}", file=sys.stderr)
 
-    fonts = missing_fonts(pdf)
-    if fonts:
-        print(f"  fonts not installed, substituting: {', '.join(fonts)}", file=sys.stderr)
-
-    if args.pptx_only:
-        pptx = out.with_suffix(".pptx")
-        pdf_to_pptx(pdf, pptx, args.separate_images, log)
-        print(f"Wrote {pptx}")
-        return
-    font_report = {}
-    reports = convert(pdf, out, args.separate_images, not args.no_verify, log, font_report=font_report)
-    if font_report.get("identified"):
-        print(f"  fonts recognised from glyphs: {', '.join(font_report['identified'])}", file=sys.stderr)
+    is_html = src.is_dir() or src.suffix.lower() in (".html", ".htm", ".zip")
+    rep = report.new("HTML deck" if is_html else "PDF")
+    if is_html:
+        from .html import convert_html, decks_in
+        decks = decks_in(src)
+        if args.list_decks:
+            for i, (name, n) in enumerate(decks):
+                print(f"{'*' if i == 0 else ' '} {name}  ({n} slides)")
+            return
+        if len(decks) > 1 and not args.deck:
+            print(f"  {len(decks)} decks in this export; converting {decks[0][0]!r} "
+                  f"(choose another with --deck, see --list-decks)", file=sys.stderr)
+        reports = convert_html(src, key_out, not args.no_verify, log, report=rep, deck=args.deck,
+                               pptx_out=pptx_out, keynote=keynote)
+    else:
+        fonts = missing_fonts(src)
+        if fonts:
+            print(f"  fonts not installed, substituting: {', '.join(fonts)}", file=sys.stderr)
+        reports = convert(src, key_out, args.separate_images, not args.no_verify, log, report=rep,
+                          pptx_out=pptx_out, keynote=keynote)
     for r in reports:
         print(f"  slide {r.page}: {r.match:.2f}% match, {r.off_pixels:.2f}% of pixels differ")
-    print(f"Wrote {out}")
+    print(report.as_text(rep))
+    for f in (key_out, pptx_out):
+        if f:
+            print(f"Wrote {f}")
 
 
 if __name__ == "__main__":

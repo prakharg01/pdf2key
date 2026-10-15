@@ -14,6 +14,7 @@ from flask import Flask, jsonify, request, send_file
 from werkzeug.utils import secure_filename
 
 from . import converter
+from . import report as reporting
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024  # 1 GB
@@ -30,14 +31,23 @@ def run_job(job_id):
         job.update(message=message, progress=fraction)
 
     try:
-        job["missing_fonts"] = converter.missing_fonts(job["pdf"])
+        is_pdf = job["pdf"].suffix.lower() == ".pdf"
+        rep = reporting.new("PDF" if is_pdf else "HTML deck")
         job["message"] = "Waiting for Keynote"
-        font_report = {}
-        with keynote_lock:
-            reports = converter.convert(
-                job["pdf"], job["key"], separate_images=job["separate_images"], verify=True,
-                progress=progress, preview_dir=job["dir"] / "preview", font_report=font_report)
-        job["identified_fonts"] = font_report.get("identified", [])
+        if is_pdf:
+            job["missing_fonts"] = converter.missing_fonts(job["pdf"])
+            with keynote_lock:
+                reports = converter.convert(
+                    job["pdf"], job["key"], separate_images=job["separate_images"], verify=True,
+                    progress=progress, preview_dir=job["dir"] / "preview", report=rep, pptx_out=job["pptx"])
+        else:  # HTML deck export (.zip / .html): experimental, movable pictures
+            from .html import convert_html
+            with keynote_lock:
+                reports = convert_html(job["pdf"], job["key"], verify=True, progress=progress,
+                                       preview_dir=job["dir"] / "preview", report=rep, deck=job.get("deck"),
+                                       pptx_out=job["pptx"])
+        job["identified_fonts"] = rep["identified"]
+        job["report"] = rep
         job["reports"] = [r.__dict__ for r in reports]
         job.update(state="done", message="Done", progress=1)
     except Exception as e:
@@ -47,18 +57,41 @@ def run_job(job_id):
 @app.post("/convert")
 def convert():
     f = request.files.get("pdf")
-    if not f or not f.filename.lower().endswith(".pdf"):
-        return jsonify(error="Please upload a PDF file."), 400
+    # an uploaded .html would arrive without the images and styles beside it,
+    # so HTML decks come in as the exported .zip
+    if not f or not f.filename.lower().endswith((".pdf", ".zip")):
+        return jsonify(error="Please upload a PDF, or an HTML deck export as its .zip."), 400
     job_id = uuid.uuid4().hex
     job_dir = WORK_DIR / job_id
     job_dir.mkdir()
     stem = Path(secure_filename(f.filename)).stem or "presentation"
-    pdf = job_dir / f"{stem}.pdf"
+    pdf = job_dir / f"{stem}{Path(f.filename).suffix.lower()}"
     f.save(pdf)
     jobs[job_id] = dict(
         state="running", message="Starting", progress=0, pdf=pdf, dir=job_dir,
-        key=job_dir / f"{stem}.key", name=f"{stem}.key",
+        key=job_dir / f"{stem}.key", name=f"{stem}.key", pptx=job_dir / f"{stem}.pptx",
         separate_images=request.form.get("separate_images") == "1", reports=[], missing_fonts=[], identified_fonts=[])
+    if pdf.suffix == ".zip":
+        from .html import decks_in
+        try:
+            decks = decks_in(pdf)
+        except Exception as e:
+            return jsonify(error=f"Couldn't read the export: {e}"), 400
+        if not decks:
+            return jsonify(error="No HTML deck (a page with <section> slides) in this .zip."), 400
+        if len(decks) > 1:  # the export holds several decks: let the person pick
+            jobs[job_id]["state"] = "choose"
+            return jsonify(id=job_id, choices=[{"name": d, "slides": n} for d, n in decks])
+    threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
+    return jsonify(id=job_id)
+
+
+@app.post("/start/<job_id>")
+def start(job_id):
+    job = jobs.get(job_id)
+    if not job or job["state"] != "choose":
+        return jsonify(error="Unknown job"), 404
+    job.update(state="running", deck=(request.get_json(silent=True) or {}).get("deck"))
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return jsonify(id=job_id)
 
@@ -68,7 +101,7 @@ def status(job_id):
     job = jobs.get(job_id)
     if not job:
         return jsonify(error="Unknown job"), 404
-    keys = ("state", "message", "progress", "error", "reports", "missing_fonts", "identified_fonts", "name")
+    keys = ("state", "message", "progress", "error", "reports", "missing_fonts", "identified_fonts", "name", "report")
     return jsonify({k: job.get(k) for k in keys})
 
 
@@ -77,6 +110,8 @@ def download(job_id):
     job = jobs.get(job_id)
     if not job or job["state"] != "done":
         return "Not ready", 404
+    if request.args.get("format") == "pptx":
+        return send_file(job["pptx"], as_attachment=True, download_name=Path(job["name"]).with_suffix(".pptx").name)
     return send_file(job["key"], as_attachment=True, download_name=job["name"])
 
 
