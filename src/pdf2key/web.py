@@ -39,12 +39,13 @@ def run_job(job_id):
             with keynote_lock:
                 reports = converter.convert(
                     job["pdf"], job["key"], separate_images=job["separate_images"], verify=True,
-                    progress=progress, preview_dir=job["dir"] / "preview", report=rep)
+                    progress=progress, preview_dir=job["dir"] / "preview", report=rep, pptx_out=job["pptx"])
         else:  # HTML deck export (.zip / .html): experimental, movable pictures
             from .html import convert_html
             with keynote_lock:
                 reports = convert_html(job["pdf"], job["key"], verify=True, progress=progress,
-                                       preview_dir=job["dir"] / "preview", report=rep, deck=job.get("deck"))
+                                       preview_dir=job["dir"] / "preview", report=rep, deck=job.get("deck"),
+                                       pptx_out=job["pptx"])
         job["identified_fonts"] = rep["identified"]
         job["report"] = rep
         job["reports"] = [r.__dict__ for r in reports]
@@ -68,7 +69,7 @@ def convert():
     f.save(pdf)
     jobs[job_id] = dict(
         state="running", message="Starting", progress=0, pdf=pdf, dir=job_dir,
-        key=job_dir / f"{stem}.key", name=f"{stem}.key",
+        key=job_dir / f"{stem}.key", name=f"{stem}.key", pptx=job_dir / f"{stem}.pptx",
         separate_images=request.form.get("separate_images") == "1", reports=[], missing_fonts=[], identified_fonts=[])
     if pdf.suffix == ".zip":
         from .html import decks_in
@@ -109,6 +110,8 @@ def download(job_id):
     job = jobs.get(job_id)
     if not job or job["state"] != "done":
         return "Not ready", 404
+    if request.args.get("format") == "pptx":
+        return send_file(job["pptx"], as_attachment=True, download_name=Path(job["name"]).with_suffix(".pptx").name)
     return send_file(job["key"], as_attachment=True, download_name=job["name"])
 
 

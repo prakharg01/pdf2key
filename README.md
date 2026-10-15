@@ -1,6 +1,6 @@
 # pdf2key
 
-Turn a **PDF** or an **HTML deck export** (such as a Claude Design `.zip`) into an Apple Keynote presentation. The result looks the same as the original, and you can edit it.
+Turn a **PDF** or an **HTML deck export** (such as a Claude Design `.zip`) into an editable presentation. You get Apple Keynote (`.key`), PowerPoint (`.pptx`), or both. The result looks the same as the original, and you can edit it.
 
 | You give it | You get |
 | --- | --- |
@@ -21,6 +21,8 @@ The web app shows the report as a card. The command line prints it at the end.
 
 - macOS with **Keynote** installed (Keynote does the final `.pptx` → `.key` step)
 - Python 3.10+
+
+A `.pptx` on its own needs no Keynote. The slide-by-slide accuracy check, though, uses Keynote to render the result. Text placement is tuned against Keynote, so PowerPoint can differ slightly in line spacing.
 - For HTML decks: **Google Chrome**, plus the `html` extra. It installs Playwright, which drives your installed Chrome (no extra browser download), and SciPy, which splits layers into objects.
 
 ## Install
@@ -40,7 +42,7 @@ python3 -m venv .venv
 .venv/bin/pdf2key-web
 ```
 
-This opens <http://127.0.0.1:5001>. Drop in a **PDF** or an **HTML deck export `.zip`** and download the `.key`. For each slide you see the original, the Keynote result, and a difference heatmap. Everything runs locally and nothing leaves your Mac.
+This opens <http://127.0.0.1:5001>. Drop in a **PDF** or an **HTML deck export `.zip`**, then download the result as **Keynote (`.key`)** or **PowerPoint (`.pptx`)**. For each slide you see the original, the Keynote result, and a difference heatmap. Everything runs locally and nothing leaves your Mac.
 
 ### Command line
 
@@ -48,6 +50,8 @@ This opens <http://127.0.0.1:5001>. Drop in a **PDF** or an **HTML deck export `
 # PDF
 .venv/bin/pdf2key deck.pdf                       # writes deck.key next to the PDF
 .venv/bin/pdf2key deck.pdf out.key
+.venv/bin/pdf2key deck.pdf --format pptx         # PowerPoint only: fast, no Keynote needed
+.venv/bin/pdf2key deck.pdf --format both         # deck.key and deck.pptx
 
 # HTML deck export: the zip, the unzipped folder, or the .html inside it
 .venv/bin/pdf2key "Short Deck.zip" out.key
@@ -57,8 +61,8 @@ This opens <http://127.0.0.1:5001>. Drop in a **PDF** or an **HTML deck export `
 
 | Option | What it does |
 | --- | --- |
+| `--format key\|pptx\|both` | Output format (default `key`). `pptx` skips Keynote, so it's fast and works without Keynote installed. |
 | `--no-verify` | Skip the comparison with the original (faster) |
-| `--pptx-only` | PDF only: write a `.pptx` instead of a `.key` (works without Keynote) |
 | `--separate-images` | PDF only: make each embedded image movable (less faithful, see below) |
 
 ### From Python
@@ -67,8 +71,8 @@ This opens <http://127.0.0.1:5001>. Drop in a **PDF** or an **HTML deck export `
 from pdf2key import convert
 from pdf2key.html import convert_html
 
-reports = convert("deck.pdf", "deck.key")
-reports = convert_html("Short Deck.zip", "deck.key")
+reports = convert("deck.pdf", "deck.key", pptx_out="deck.pptx")      # both formats
+reports = convert_html("Short Deck.zip", None, pptx_out="deck.pptx", keynote=False)  # PowerPoint only
 for r in reports:
     print(r.page, r.match, r.off_pixels)
 ```
