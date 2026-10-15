@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 FONT_DIRS = [Path("/Library/Fonts"), Path("/System/Library/Fonts"), Path.home() / "Library/Fonts"]
-CACHE = Path.home() / "Library/Caches/pdf2key/fonts-v3.json"
+CACHE = Path.home() / "Library/Caches/pdf2key/fonts-v4.json"
 # Latin, punctuation, currency, arrows: enough to fingerprint text faces
 CODEPOINTS = [*range(0x20, 0x250), *range(0x2000, 0x20D0), *range(0x2190, 0x2200)]
 
@@ -32,6 +32,7 @@ class Face:
     system: bool    # ships with macOS (vs. installed by the user)
     path: str       # font file, and its index inside a .ttc collection
     index: int
+    coords: dict    # variable fonts: axis values of this named instance
     adv: dict       # codepoint -> advance in em
 
     @property
@@ -39,6 +40,17 @@ class Face:
         """Name Keynote resolves to this exact face."""
         style = re.sub(r"\b(Regular|Italic|Roman|Book)\b", "", self.style).strip()
         return f"{self.family} {style}".strip()
+
+    @property
+    def run_font(self):
+        """(name, bold, italic) for a text run, the way Office and Keynote both
+        resolve it: Regular/Bold/Italic/Bold Italic are the family plus flags;
+        other weights use their own family name, e.g. "Montserrat ExtraBold"
+        (the legacy family name of the static font file)."""
+        style = " ".join(w for w in self.style.split() if w.lower() not in ("regular", "roman", "book")).lower()
+        if style in ("", "bold", "italic", "bold italic"):
+            return self.family, "bold" in style, "italic" in style or self.italic
+        return re.sub(r"\s+Italic$", "", self.keynote_name), False, self.italic
 
 
 
@@ -57,14 +69,14 @@ def _faces_in(tt, path, index=0):
             adv = {cp: round(gs[g].width / upm, 5) for cp, g in wanted.items() if g in gs}
             italic = "italic" in style.lower() or "italic" in path.name.lower()
             yield Face(family, style, int(inst.coordinates.get("wght", 400)), italic, mono, True, system,
-                       str(path), index, adv)
+                       str(path), index, dict(inst.coordinates), adv)
     else:
         style = name.getDebugName(17) or name.getDebugName(2) or "Regular"
         hm = tt["hmtx"].metrics
         adv = {cp: round(hm[g][0] / upm, 5) for cp, g in wanted.items() if g in hm}
         weight = tt["OS/2"].usWeightClass if "OS/2" in tt else 400
         italic = bool(tt["head"].macStyle & 2) or "italic" in style.lower()
-        yield Face(family, style, weight, italic, mono, False, system, str(path), index, adv)
+        yield Face(family, style, weight, italic, mono, False, system, str(path), index, {}, adv)
 
 
 _CP_SET = set(CODEPOINTS)
@@ -164,3 +176,30 @@ def identify(samples, slanted=None, faces=None):
     return sorted(tied, key=lambda m: (m.error > best + 0.0005 and not m.face.mono,
                                        slanted is not None and m.face.italic != slanted,
                                        m.face.variable, m.face.system, m.error))
+
+
+def find_face(name, bold=False, italic=False):
+    """The installed face a run's font name and flags resolve to, if any."""
+    exact = [f for f in catalog() if f.run_font == (name, bold, italic)]
+    if exact:  # prefer the user's static files over variable instances and system copies
+        return min(exact, key=lambda f: (f.variable, f.system))
+    want = name.lower()
+    loose = [f for f in catalog() if f.keynote_name.lower() == want and f.italic == italic
+             and ("bold" in f.style.lower()) == bold]
+    return min(loose, key=lambda f: (f.variable, f.system)) if loose else None
+
+
+def license_of(face):
+    """(license text, url, copyright, redistributable, reserved names?) from the font file."""
+    from fontTools.ttLib import TTCollection, TTFont
+    try:
+        tt = (TTCollection(face.path, lazy=True).fonts[face.index] if face.path.lower().endswith(".ttc")
+              else TTFont(face.path, lazy=True))
+        name = tt["name"]
+        text, url, copyright_ = (name.getDebugName(i) or "" for i in (13, 14, 0))
+    except Exception:
+        return "", "", "", False, False
+    free = bool(re.search(r"open font license|\bOFL\b|apache license|ubuntu font licen[cs]e", text + url, re.I))
+    reserved = "reserved font name" in (text + copyright_).lower()
+    return text, url, copyright_, free and not face.system, reserved
+

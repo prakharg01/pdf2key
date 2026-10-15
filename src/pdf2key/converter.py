@@ -116,7 +116,8 @@ def _font_info(pdf_name, flags, mono=False, weight=None, slanted=False, face=Non
     sizes are scaled per text box to keep line widths close to the PDF.
     """
     if face:
-        return face.keynote_name, False, face.italic, None, True
+        name, bold, italic = face.run_font
+        return name, bold, italic, None, True
     if _anonymous(pdf_name):
         # weight/slanted are measured from the glyphs (see _measure_fonts)
         if mono:

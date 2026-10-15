@@ -137,7 +137,7 @@ def test_rebuild_measures_justified_word_spacing():
 
 def _face(family, style, adv, mono=False, italic=False, system=False):
     from pdf2key.fonts import Face
-    return Face(family, style, 400, italic, mono, False, system, "", 0, adv)
+    return Face(family, style, 400, italic, mono, False, system, "", 0, {}, adv)
 
 
 def test_identify_font_from_glyph_widths():
@@ -167,7 +167,27 @@ def test_identify_prefers_user_installed_and_italic_hint():
 
 def test_cli_format_pptx_needs_no_keynote(sample_pdf, tmp_path, capsys):
     from pdf2key.cli import main
-    main([str(sample_pdf), str(tmp_path / "out.key"), "--format", "pptx"])
+    main([str(sample_pdf), str(tmp_path / "out.key"), "--format", "pptx", "--no-bundle"])
     assert (tmp_path / "out.pptx").exists() and not (tmp_path / "out.key").exists()
     assert len(Presentation(tmp_path / "out.pptx").slides) == 2
     assert "Conversion report" in capsys.readouterr().out
+
+
+def test_cli_default_is_an_export_folder_with_readme_and_results(sample_pdf, tmp_path):
+    from pdf2key.cli import main
+    folder = tmp_path / "Shared deck"
+    main([str(sample_pdf), str(folder), "--format", "pptx"])
+    assert (folder / "sample.pptx").exists()
+    readme = (folder / "README.txt").read_text()
+    assert "Before you open it" in readme and "Fonts this presentation uses" in readme
+    assert "sample.pptx" in readme
+    assert (folder / "results" / "report.txt").exists() and (folder / "results" / "report.json").exists()
+
+
+def test_find_face_matches_weight_not_just_name(monkeypatch):
+    from pdf2key import fonts
+    regular = _face("Plex", "Regular", {})
+    bold = _face("Plex", "Bold", {})
+    monkeypatch.setattr(fonts, "_catalog", [regular, bold])
+    assert fonts.find_face("Plex", bold=True) is bold
+    assert fonts.find_face("Plex") is regular

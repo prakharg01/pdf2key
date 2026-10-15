@@ -7,7 +7,7 @@ def new(kind):
     return {"input": kind, "slides": 0, "seconds": 0.0, "accuracy": None, "objects": {},
             "fonts": {"recognised": [], "installed": [], "substituted": [], "estimated": []},
             "text": {"boxes": 0, "letter_spaced": 0, "justified_lines": 0, "rotated": 0, "scales": []},
-            "warnings": [], "identified": []}
+            "warnings": [], "identified": [], "font_usage": []}
 
 
 def text_stats(report):
@@ -18,7 +18,9 @@ def record_fonts(report, pages_blocks, span_font, anonymous):
     """How each piece of text's font was resolved, weighted by characters."""
     if report is None:
         return
+    from . import fonts
     recognised, installed, substituted, estimated = Counter(), Counter(), Counter(), Counter()
+    usage = {}  # (run font name, bold, italic) -> what the export folder needs to say and ship
     for blocks in pages_blocks:
         for lines in blocks:
             for line in lines:
@@ -28,6 +30,16 @@ def record_fonts(report, pages_blocks, span_font, anonymous):
                         continue
                     family, bold, italic, _, exact = span_font(s)
                     style = family + (" Bold" if bold else "") + (" Italic" if italic else "")
+                    face = s.get("face") or (fonts.find_face(family, bold, italic) if exact or not anonymous(s["font"])
+                                             else None) or fonts.find_face(family, bold, italic)
+                    u = usage.setdefault((family, bold, italic), {
+                        "name": family, "bold": bold, "italic": italic, "display": style, "chars": 0,
+                        "kind": "recognised" if s.get("face") else "estimated" if anonymous(s["font"])
+                                else "installed" if exact else "substituted",
+                        "original": set(), "face": face})
+                    u["chars"] += n
+                    if not anonymous(s["font"]):
+                        u["original"].add(s["font"].split("+")[-1])
                     if s.get("face"):
                         recognised[style] += n
                     elif anonymous(s["font"]):
@@ -37,6 +49,11 @@ def record_fonts(report, pages_blocks, span_font, anonymous):
                     else:
                         original = s["font"].split("+")[-1]
                         substituted[(original, style)] += n
+    for u in usage.values():  # keep the report JSON-friendly
+        face = u["face"]
+        u["face"] = None if face is None else {k: v for k, v in face.__dict__.items() if k != "adv"}
+        u["original"] = sorted(u["original"])
+    report["font_usage"] = sorted(usage.values(), key=lambda u: -u["chars"])
     f = report["fonts"]
     f["recognised"] = recognised.most_common()
     f["installed"] = installed.most_common()
