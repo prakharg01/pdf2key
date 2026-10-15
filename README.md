@@ -7,7 +7,19 @@ Turn a **PDF** or an **HTML deck export** (such as a Claude Design `.zip`) into 
 | A PDF | Editable text. Everything else (photos, shapes, gradients) is one picture behind the text, exactly as the PDF draws it. |
 | An HTML deck export (`.zip`, unzipped folder, or its `.html`) *(experimental)* | Editable text **and movable photos**. Each photo is its own Keynote picture, made from the original image file with its crop. Cards, overlays and backgrounds are transparent layers in between. |
 
-After converting, pdf2key exports every slide back out of Keynote, compares it pixel by pixel with the original, and gives you a **conversion report**:
+Every export is a **folder that's ready to share**:
+
+```
+Short Deck - pdf2key/
+├── Short Deck.key, Short Deck.pptx
+├── README.txt     ← for whoever receives it: fonts to install on a fresh Mac or PC, per app, and troubleshooting
+├── fonts/         ← the open-licensed fonts the deck uses (static files, ready to install) + FONTS-LICENSE.txt
+└── results/       ← report.txt, report.json and per-slide comparisons (original · converted · difference)
+```
+
+Fonts are the usual reason a shared deck looks wrong on someone else's computer: an app silently swaps a missing font and headings change weight or width. So pdf2key ships every font the deck uses whose license allows it (SIL Open Font License, Apache). Fonts that live inside a variable font, such as Montserrat, are written out as **static files**, e.g. `Montserrat-ExtraBold.ttf`. Their internal names match what the slides ask for, so PowerPoint finds them too: it can't pick a named weight out of a variable font. Mac system fonts (Helvetica Neue, Menlo) aren't copied; the README explains what Windows shows instead. In the web app it's the **Download everything (.zip)** button.
+
+After converting, pdf2key also exports every slide back out of Keynote, compares it pixel by pixel with the original, and gives you a **conversion report**:
 
 - **Results:** slides, time taken, the average match and the lowest-matching slides.
 - **Objects created:** text boxes, photos, shapes, overlays and photo groups.
@@ -48,10 +60,10 @@ This opens <http://127.0.0.1:5001>. Drop in a **PDF** or an **HTML deck export `
 
 ```bash
 # PDF
-.venv/bin/pdf2key deck.pdf                       # writes deck.key next to the PDF
-.venv/bin/pdf2key deck.pdf out.key
+.venv/bin/pdf2key deck.pdf                       # export folder "deck - pdf2key/" next to the PDF (.key + .pptx)
+.venv/bin/pdf2key deck.pdf "For the team"        # ...into a folder you name
 .venv/bin/pdf2key deck.pdf --format pptx         # PowerPoint only: fast, no Keynote needed
-.venv/bin/pdf2key deck.pdf --format both         # deck.key and deck.pptx
+.venv/bin/pdf2key deck.pdf out.key --no-bundle   # just the file, no folder
 
 # HTML deck export: the zip, the unzipped folder, or the .html inside it
 .venv/bin/pdf2key "Short Deck.zip" out.key
@@ -61,7 +73,8 @@ This opens <http://127.0.0.1:5001>. Drop in a **PDF** or an **HTML deck export `
 
 | Option | What it does |
 | --- | --- |
-| `--format key\|pptx\|both` | Output format (default `key`). `pptx` skips Keynote, so it's fast and works without Keynote installed. |
+| `--format key\|pptx\|both` | Output format (default `both`). `pptx` skips Keynote, so it's fast and works without Keynote installed. |
+| `--no-bundle` | Write only the presentation file(s), without the README, fonts and results (default format then `key`) |
 | `--no-verify` | Skip the comparison with the original (faster) |
 | `--separate-images` | PDF only: make each embedded image movable (less faithful, see below) |
 
@@ -166,6 +179,7 @@ src/pdf2key/
   fonts.py       installed-font catalog and glyph-width font matching
   html.py        HTML deck input (movable pictures), experimental
   report.py      the conversion report
+  bundle.py      the export folder: README for recipients, fonts, results
   cli.py         `pdf2key` command
   web.py         `pdf2key-web` Flask app
   static/        web UI

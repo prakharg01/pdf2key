@@ -65,8 +65,9 @@ button.ghost{background:none;border:1px solid var(--line);color:var(--ink);borde
 </div>
 <div id="result" class="hide" style="margin-top:22px">
   <div class="card">
-    <div class="row"><a id="dl" class="go">Download Keynote (.key)</a><a id="dlx" class="go alt">Download PowerPoint (.pptx)</a><button class="ghost" id="again">Convert another</button></div>
-    <p id="summary" style="margin:14px 0 0"></p>
+    <div class="row"><a id="dlz" class="go">Download everything (.zip)</a><a id="dl" class="go alt">Keynote (.key)</a><a id="dlx" class="go alt">PowerPoint (.pptx)</a><button class="ghost" id="again">Convert another</button></div>
+    <p style="margin:12px 0 0;color:var(--mute);font-size:14px">The .zip is ready to share: both files, the fonts they need, a README with setup steps for a fresh Mac or PC, and this report.</p>
+    <p id="summary" style="margin:10px 0 0"></p>
     <div id="fonts" class="note hide"></div>
     <p id="found" class="hide" style="margin:12px 0 0;color:var(--mute);font-size:14px"></p>
   </div>
@@ -248,7 +249,7 @@ async function poll(id){
 function show(id,s){
   art.stop();stopQuips();
   $('work').classList.add('hide');$('result').classList.remove('hide');
-  $('dl').href='/download/'+id;$('dlx').href='/download/'+id+'?format=pptx';
+  $('dl').href='/download/'+id;$('dlx').href='/download/'+id+'?format=pptx';$('dlz').href='/download/'+id+'?format=zip';
   const r=s.reports||[];
   if(r.length){const avg=r.reduce((a,x)=>a+x.match,0)/r.length;
     $('summary').innerHTML='<b>'+r.length+' slide'+(r.length>1?'s':'')+'</b> converted. Average pixel match with the original: <b>'+avg.toFixed(1)+'%</b>.'}

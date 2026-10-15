@@ -13,7 +13,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_file
 from werkzeug.utils import secure_filename
 
-from . import converter
+from . import bundle, converter
 from . import report as reporting
 
 app = Flask(__name__)
@@ -39,13 +39,17 @@ def run_job(job_id):
             with keynote_lock:
                 reports = converter.convert(
                     job["pdf"], job["key"], separate_images=job["separate_images"], verify=True,
-                    progress=progress, preview_dir=job["dir"] / "preview", report=rep, pptx_out=job["pptx"])
+                    progress=progress, preview_dir=job["preview"], report=rep, pptx_out=job["pptx"])
         else:  # HTML deck export (.zip / .html): experimental, movable pictures
             from .html import convert_html
             with keynote_lock:
                 reports = convert_html(job["pdf"], job["key"], verify=True, progress=progress,
-                                       preview_dir=job["dir"] / "preview", report=rep, deck=job.get("deck"),
+                                       preview_dir=job["preview"], report=rep, deck=job.get("deck"),
                                        pptx_out=job["pptx"])
+        job["message"] = "Packing fonts, README and results"
+        bundle.write(job["folder"], rep, {"key": job["key"], "pptx": job["pptx"]},
+                     Path(rep.get("deck") or job["stem"]).stem, job["preview"])
+        job["zip"] = bundle.zip_folder(job["folder"], job["dir"] / job["folder"].name)
         job["identified_fonts"] = rep["identified"]
         job["report"] = rep
         job["reports"] = [r.__dict__ for r in reports]
@@ -67,9 +71,11 @@ def convert():
     stem = Path(secure_filename(f.filename)).stem or "presentation"
     pdf = job_dir / f"{stem}{Path(f.filename).suffix.lower()}"
     f.save(pdf)
+    folder = bundle.folder_for(pdf)  # "<name> - pdf2key", inside the job's directory
     jobs[job_id] = dict(
-        state="running", message="Starting", progress=0, pdf=pdf, dir=job_dir,
-        key=job_dir / f"{stem}.key", name=f"{stem}.key", pptx=job_dir / f"{stem}.pptx",
+        state="running", message="Starting", progress=0, pdf=pdf, dir=job_dir, folder=folder, stem=stem,
+        key=folder / f"{stem}.key", name=f"{stem}.key", pptx=folder / f"{stem}.pptx",
+        preview=folder / "results" / "slides",
         separate_images=request.form.get("separate_images") == "1", reports=[], missing_fonts=[], identified_fonts=[])
     if pdf.suffix == ".zip":
         from .html import decks_in
@@ -110,6 +116,8 @@ def download(job_id):
     job = jobs.get(job_id)
     if not job or job["state"] != "done":
         return "Not ready", 404
+    if request.args.get("format") == "zip":
+        return send_file(job["zip"], as_attachment=True, download_name=job["zip"].name)
     if request.args.get("format") == "pptx":
         return send_file(job["pptx"], as_attachment=True, download_name=Path(job["name"]).with_suffix(".pptx").name)
     return send_file(job["key"], as_attachment=True, download_name=job["name"])
@@ -118,7 +126,7 @@ def download(job_id):
 @app.get("/preview/<job_id>/<name>")
 def preview(job_id, name):
     job = jobs.get(job_id)
-    path = job["dir"] / "preview" / secure_filename(name) if job else None
+    path = job["preview"] / secure_filename(name) if job else None
     if not path or not path.exists():
         return "Not found", 404
     return send_file(path)
