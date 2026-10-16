@@ -499,7 +499,7 @@ def _assign_styles(pages_blocks, stats):
         rel = r / body
         weight[f] = "bold" if rel > 1.45 or r > 1.75 else "medium" if rel > 1.15 else "regular"
         st = stats[f]
-        slanted[f] = st["samples"] > 0 and SLANTS[int(np.argmax(st["sharp"]))] >= 0.1
+        slanted[f] = bool(st["samples"] > 0 and SLANTS[int(np.argmax(st["sharp"]))] >= 0.1)
     for _, s in _spans(pages_blocks):
         if s["font"] in weight:
             s["weight"] = weight[s["font"]]
@@ -774,17 +774,26 @@ def new_presentation(width_pt, height_pt):
     return prs
 
 
-def analyze_text(doc, progress=None, report=None):
-    """Text of every page, rebuilt and with fonts resolved: one block list per page."""
-    pages_blocks, stats = [], {}
-    for i, page in enumerate(doc):
+def analyze_text(doc, progress=None, report=None, span=(0.0, 0.3)):
+    """Text of every page, rebuilt and with fonts resolved: one block list per page.
+    `span` is the share of the overall progress bar this step covers."""
+    lo, hi = span
+
+    def say(msg, frac):
         if progress:
-            progress(f"Reading text on page {i + 1} of {len(doc)}", 0.3 * i / len(doc))
+            progress(msg, lo + (hi - lo) * frac)
+
+    pages_blocks, stats = [], {}
+    n = len(doc)
+    for i, page in enumerate(doc):
+        say(f"Reading text on page {i + 1} of {n}", 0.4 * i / n)
         pages_blocks.append(_extract_blocks(page))
     _unify_mono(pages_blocks)
-    for page, blocks in zip(doc, pages_blocks):
+    for i, (page, blocks) in enumerate(zip(doc, pages_blocks)):
+        say(f"Measuring fonts on page {i + 1} of {n}", 0.4 + 0.4 * i / n)
         _measure_fonts(page, blocks, stats)
     _assign_styles(pages_blocks, stats)
+    say("Recognising fonts from their letter widths", 0.85)
     _identify_fonts(doc, pages_blocks)
     reporting.record_fonts(report, pages_blocks, _span_font, _anonymous)
     return pages_blocks

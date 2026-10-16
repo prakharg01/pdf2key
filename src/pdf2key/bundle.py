@@ -287,7 +287,7 @@ def write(folder, report, outputs, title, preview_dir=None):
     results = folder / "results"
     results.mkdir(exist_ok=True)
     (results / "report.txt").write_text(reporting.as_text(report).lstrip() + "\n", encoding="utf-8")
-    (results / "report.json").write_text(json.dumps(report, indent=1, default=str), encoding="utf-8")
+    (results / "report.json").write_text(json.dumps(reporting.plain(report), indent=1), encoding="utf-8")
     if preview_dir and Path(preview_dir).exists() and Path(preview_dir).resolve() != (results / "slides").resolve():
         shutil.copytree(preview_dir, results / "slides", dirs_exist_ok=True)
 

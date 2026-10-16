@@ -33,7 +33,8 @@ def run_job(job_id):
     try:
         is_pdf = job["pdf"].suffix.lower() == ".pdf"
         rep = reporting.new("PDF" if is_pdf else "HTML deck")
-        job["message"] = "Waiting for Keynote"
+        job["message"] = ("Waiting for another conversion to finish" if keynote_lock.locked()
+                          else "Starting")
         if is_pdf:
             job["missing_fonts"] = converter.missing_fonts(job["pdf"])
             with keynote_lock:
@@ -51,7 +52,7 @@ def run_job(job_id):
                      Path(rep.get("deck") or job["stem"]).stem, job["preview"])
         job["zip"] = bundle.zip_folder(job["folder"], job["dir"] / job["folder"].name)
         job["identified_fonts"] = rep["identified"]
-        job["report"] = rep
+        job["report"] = reporting.plain(rep)
         job["reports"] = [r.__dict__ for r in reports]
         job.update(state="done", message="Done", progress=1)
     except Exception as e:

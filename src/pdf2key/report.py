@@ -33,7 +33,7 @@ def record_fonts(report, pages_blocks, span_font, anonymous):
                     face = s.get("face") or (fonts.find_face(family, bold, italic) if exact or not anonymous(s["font"])
                                              else None) or fonts.find_face(family, bold, italic)
                     u = usage.setdefault((family, bold, italic), {
-                        "name": family, "bold": bold, "italic": italic, "display": style, "chars": 0,
+                        "name": family, "bold": bool(bold), "italic": bool(italic), "display": style, "chars": 0,
                         "kind": "recognised" if s.get("face") else "estimated" if anonymous(s["font"])
                                 else "installed" if exact else "substituted",
                         "original": set(), "face": face})
@@ -137,3 +137,18 @@ def as_text(report):
     for w in report["warnings"]:
         out.append(f"Warning: {w}")
     return "\n".join(out)
+
+
+def plain(value):
+    """The report as plain JSON types (NumPy numbers and booleans sneak in from
+    the image measurements), so it can always be sent and saved."""
+    import json
+
+    def convert(o):
+        if hasattr(o, "item"):  # numpy scalar
+            return o.item()
+        if isinstance(o, (set, tuple)):
+            return list(o)
+        return str(o)
+    return json.loads(json.dumps(value, default=convert))
+

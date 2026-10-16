@@ -191,3 +191,11 @@ def test_find_face_matches_weight_not_just_name(monkeypatch):
     monkeypatch.setattr(fonts, "_catalog", [regular, bold])
     assert fonts.find_face("Plex", bold=True) is bold
     assert fonts.find_face("Plex") is regular
+
+
+def test_report_survives_numpy_values():
+    import json
+    import numpy as np
+    from pdf2key.report import plain
+    rep = {"font_usage": [{"italic": np.bool_(True), "chars": np.int64(3), "scale": np.float64(1.5)}]}
+    assert json.dumps(plain(rep)) == '{"font_usage": [{"italic": true, "chars": 3, "scale": 1.5}]}'
