@@ -42,6 +42,18 @@ button.ghost{background:none;border:1px solid var(--line);color:var(--ink);borde
 #report ul{margin:0;padding-left:18px}#report li{margin:2px 0}
 #report .n{color:var(--mute);font-variant-numeric:tabular-nums}
 #report .stats{display:flex;flex-wrap:wrap;gap:8px 22px}#report .stats b{font-size:20px;display:block}
+#steps{list-style:none;margin:6px 0 4px;padding:0;display:grid;gap:2px}
+#steps li{display:grid;grid-template-columns:22px 1fr auto;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;color:var(--mute);font-size:14px}
+#steps li .ic{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--line);display:grid;place-items:center;font-size:11px;line-height:1}
+#steps li.active{color:var(--ink);background:color-mix(in srgb,var(--accent) 9%,transparent)}
+#steps li.active .ic{border-color:var(--accent);border-top-color:transparent;animation:spin 0.9s linear infinite}
+#steps li.done{color:var(--ink)}#steps li.done .ic{border-color:var(--ok);background:var(--ok);color:#fff}
+#steps li.failed .ic{border-color:#d33;background:#d33;color:#fff}
+#steps li .t{font-variant-numeric:tabular-nums;color:var(--mute);font-size:13px}
+#steps li .d{color:var(--mute);font-size:13px;margin-left:6px}
+.mute{color:var(--mute);font-size:14px;font-variant-numeric:tabular-nums}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){#steps li.active .ic{animation:none;border-top-color:var(--accent)}}
 #quip{min-height:1.5em;margin:0 0 12px;color:var(--mute);font-size:14px;text-align:center;transition:opacity .4s}
 </style></head><body><main>
 <h1>PDF to Keynote</h1>
@@ -60,7 +72,9 @@ button.ghost{background:none;border:1px solid var(--line);color:var(--ink);borde
 <div id="work" class="card hide" style="margin-top:22px">
   <canvas id="art" aria-hidden="true"></canvas>
   <p id="quip" aria-live="polite"></p>
-  <div id="msg">Starting…</div><div class="bar"><i id="fill"></i></div>
+  <ol id="steps"></ol>
+  <div class="row" style="justify-content:space-between;margin-top:10px"><span id="msg">Starting…</span><span id="elapsed" class="mute"></span></div>
+  <div class="bar"><i id="fill"></i></div>
   <div id="err" class="err hide"></div>
 </div>
 <div id="result" class="hide" style="margin-top:22px">
@@ -177,8 +191,8 @@ const QUIPS={
   compare:['Comparing every slide with the original, pixel by pixel…','Drawing the difference heatmaps…']};
 let quipTimer=0,quipStage='',quipIdx=0;
 function stageOf(m){m=(m||'').toLowerCase();
-  return m.includes('compar')?'compare':m.includes('keynote')?'keynote':m.includes('laying')?'layout'
-        :m.includes('building')?'build':'read'}
+  return m.includes('compar')?'compare':m.startsWith('importing into keynote')?'keynote'
+        :m.includes('laying')?'layout':m.includes('building')?'build':m.includes('packing')?'compare':'read'}
 function setQuip(stage){
   if(stage===quipStage)return;quipStage=stage;quipIdx=0;showQuip();
   clearInterval(quipTimer);quipTimer=setInterval(showQuip,3800)}
@@ -215,39 +229,77 @@ function renderReport(r){
   el.innerHTML=h;el.classList.remove('hide')}
 
 function chooseDeck(id,choices){
+  advanceTo(1);clearInterval(tick);  // upload done; the clock waits while you choose
   art.stop();stopQuips();$('work').classList.add('hide');$('pick').classList.remove('hide');
   $('choices').innerHTML=choices.map((c,i)=>`<label><input type="radio" name="deck" value="${esc(c.name)}"${i?'':' checked'}>
     <span>${esc(c.name)}</span><span class="n">${c.slides} slides</span></label>`).join('');
   $('pickgo').onclick=async()=>{const deck=document.querySelector('input[name=deck]:checked').value;
     $('pick').classList.add('hide');$('work').classList.remove('hide');art.start();setQuip('layout');
+    stepStart=Date.now();clearInterval(tick);tick=setInterval(renderSteps,1000);
     $('msg').textContent='Starting…';
     const r=await fetch('/start/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({deck})});
     const j=await r.json();if(!r.ok)return fail(j.error);poll(id)}}
+
+/* ---- stage checklist: which step is done, which is running, how long each took ---- */
+const STEP_DEFS={
+  upload:{label:'Uploading',re:/^Upload/},
+  layout:{label:'Laying out slides in Chrome',re:/^Laying out/},
+  text:{label:'Reading text and recognising fonts',re:/^(Reading text|Measuring fonts|Recognising fonts)/},
+  build:{label:'Building slides',re:/^Building slide/},
+  keynote:{label:'Keynote: import, save, export slide images',re:/^Importing into Keynote/},
+  compare:{label:'Comparing with the original',re:/^Comparing/},
+  pack:{label:'Packing fonts, README and results',re:/^Packing/}};
+let steps=[],stepAt=0,stepStart=0,runStart=0,tick=0;
+function initSteps(isHtml){
+  steps=(isHtml?['upload','layout','text','build','keynote','compare','pack']:['upload','text','build','keynote','compare','pack'])
+    .map(k=>({k,...STEP_DEFS[k],state:'pending',secs:null,detail:''}));
+  stepAt=0;runStart=stepStart=Date.now();steps[0].state='active';renderSteps();
+  clearInterval(tick);tick=setInterval(()=>{renderSteps()},1000)}
+function fmt(s){s=Math.round(s);return s<60?s+' s':Math.floor(s/60)+':'+String(s%60).padStart(2,'0')}
+function advanceTo(i,detail){
+  if(i<0||!steps.length)return;
+  if(i>stepAt){const now=Date.now();
+    for(let j=stepAt;j<i;j++){steps[j].state='done';if(steps[j].secs===null)steps[j].secs=(now-stepStart)/1000;stepStart=now}
+    stepAt=i;steps[i].state='active'}
+  if(detail!==undefined&&i===stepAt)steps[i].detail=detail;renderSteps()}
+function stepFromMessage(m){
+  for(let i=steps.length-1;i>=0;i--)if(steps[i].re.test(m||''))return i;return -1}
+function detailOf(m){const x=/(slide|page) (\d+) of (\d+)/.exec(m||'');return x?`${x[1]} ${x[2]} of ${x[3]}`:''}
+function finishSteps(ok){const now=Date.now();
+  steps.forEach((s,j)=>{if(s.state==='active'){s.state=ok?'done':'failed';s.secs=(now-stepStart)/1000}
+    else if(ok&&s.state==='pending'){s.state='done'}});clearInterval(tick);renderSteps()}
+function renderSteps(){
+  const live=(Date.now()-stepStart)/1000;
+  $('steps').innerHTML=steps.map(s=>`<li class="${s.state}"><span class="ic">${s.state==='done'?'✓':s.state==='failed'?'!':''}</span>
+    <span>${s.label}${s.state==='active'&&s.detail?`<span class="d">${s.detail}</span>`:''}</span>
+    <span class="t">${s.secs!==null?fmt(s.secs):s.state==='active'?fmt(live):''}</span></li>`).join('');
+  if(runStart)$('elapsed').textContent='Elapsed '+fmt((Date.now()-runStart)/1000)}
 
 async function start(f){
   if(!/\.(pdf|zip)$/i.test(f.name)){alert('Please choose a PDF, or an HTML deck export as its .zip.');return}
   drop.classList.add('hide');$('bg').parentElement.classList.add('hide');
   $('work').classList.remove('hide');$('result').classList.add('hide');
   $('err').classList.add('hide');$('msg').textContent='Uploading…';$('fill').style.width='2%';
-  art.start();setQuip('read');
+  art.start();setQuip('read');initSteps(/\.zip$/i.test(f.name));
   const fd=new FormData();fd.append('pdf',f);fd.append('separate_images',$('bg').checked?'1':'0');
   const r=await fetch('/convert',{method:'POST',body:fd});const j=await r.json();
   if(!r.ok){fail(j.error);return}
   if(j.choices){chooseDeck(j.id,j.choices);return}
   poll(j.id);
 }
-function fail(m){art.stop();stopQuips();$('quip').textContent='';$('err').textContent=m||'Conversion failed';$('err').classList.remove('hide');$('msg').textContent='Something went wrong';
+function fail(m){art.stop();stopQuips();finishSteps(false);$('quip').textContent='';$('err').textContent=m||'Conversion failed';$('err').classList.remove('hide');$('msg').textContent='Something went wrong';
   drop.classList.remove('hide');$('bg').parentElement.classList.remove('hide')}
 async function poll(id){
   const s=await (await fetch('/status/'+id)).json();
   $('msg').textContent=s.message||'Working…';$('fill').style.width=Math.max(2,(s.progress||0)*100)+'%';
   setQuip(stageOf(s.message));
+  if(s.state==='running'){const i=stepFromMessage(s.message);if(i>=0)advanceTo(i,detailOf(s.message));else if(stepAt===0)advanceTo(1)}
   if(s.state==='error')return fail(s.error);
   if(s.state==='done')return show(id,s);
   setTimeout(()=>poll(id),700);
 }
 function show(id,s){
-  art.stop();stopQuips();
+  art.stop();stopQuips();finishSteps(true);
   $('work').classList.add('hide');$('result').classList.remove('hide');
   $('dl').href='/download/'+id;$('dlx').href='/download/'+id+'?format=pptx';$('dlz').href='/download/'+id+'?format=zip';
   const r=s.reports||[];
